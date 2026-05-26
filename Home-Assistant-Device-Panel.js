@@ -1,4 +1,4 @@
-const VERSION = "1.1.9";
+const VERSION = "1.1.10";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -58,6 +58,7 @@ class OfflineDevicePanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._loadRegistries(hass);
+    if (this._isControlActive()) return;
     this._render({ preserveScroll: true });
   }
 
@@ -140,10 +141,16 @@ class OfflineDevicePanel extends HTMLElement {
       this._entities = entities || [];
       this._devices = devices || [];
       this._areas = areas || [];
-      this._render();
+      if (this._isControlActive()) return;
+      this._render({ preserveScroll: true });
     } catch (error) {
       console.warn("offline-device-panel: registry lookup failed", error);
     }
+  }
+
+  _isControlActive() {
+    const active = this.shadowRoot?.activeElement || document.activeElement;
+    return Boolean(this._openMulti) || ["INPUT", "SELECT", "TEXTAREA", "SUMMARY"].includes(active?.tagName);
   }
 
   _deviceRows() {
