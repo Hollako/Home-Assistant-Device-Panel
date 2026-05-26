@@ -1,4 +1,4 @@
-const VERSION = "1.1.8";
+const VERSION = "1.1.9";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -314,7 +314,8 @@ class OfflineDevicePanel extends HTMLElement {
     const rows = this._filteredRows();
     const offlineCount = allRows.filter((row) => row.offline).length;
     const onlineCount = allRows.length - offlineCount;
-    const statusText = `${offlineCount} offline / ${onlineCount} online`;
+    const totalCount = allRows.length;
+    const statusText = `${offlineCount} offline / ${onlineCount} online / ${totalCount} total`;
     const offlineAreas = this._offlineAreaSummary(allRows);
 
     this.shadowRoot.innerHTML = `
@@ -438,10 +439,7 @@ class OfflineDevicePanel extends HTMLElement {
             restoredInput?.setSelectionRange?.(selectionStart, selectionEnd);
           }
         }
-        if (this._openMulti) {
-          const restoredMenu = this.shadowRoot.querySelector(`[data-multi-menu="${this._openMulti}"]`);
-          if (restoredMenu) restoredMenu.scrollTo(menuScrollLeft, menuScrollTop);
-        }
+        if (this._openMulti) this._restoreOpenMultiSoon(menuScrollLeft, menuScrollTop);
       });
     }
   }
@@ -503,6 +501,21 @@ class OfflineDevicePanel extends HTMLElement {
     this._restoreScroll(snapshots);
     requestAnimationFrame(() => this._restoreScroll(snapshots));
     window.setTimeout(() => this._restoreScroll(snapshots), 80);
+  }
+
+  _restoreOpenMulti(scrollLeft = 0, scrollTop = 0) {
+    if (!this._openMulti || !this.shadowRoot) return;
+    const details = this.shadowRoot.querySelector(`[data-multi-details="${this._cssEscape(this._openMulti)}"]`);
+    if (details) details.open = true;
+    const menu = this.shadowRoot.querySelector(`[data-multi-menu="${this._cssEscape(this._openMulti)}"]`);
+    if (menu) menu.scrollTo(scrollLeft, scrollTop);
+  }
+
+  _restoreOpenMultiSoon(scrollLeft = 0, scrollTop = 0) {
+    this._restoreOpenMulti(scrollLeft, scrollTop);
+    requestAnimationFrame(() => this._restoreOpenMulti(scrollLeft, scrollTop));
+    window.setTimeout(() => this._restoreOpenMulti(scrollLeft, scrollTop), 80);
+    window.setTimeout(() => this._restoreOpenMulti(scrollLeft, scrollTop), 250);
   }
 
   _statusOptions() {
@@ -667,7 +680,8 @@ class OfflineDevicePanel extends HTMLElement {
   }
 
   _cssEscape(value) {
-    return window.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/"/g, '\\"');
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   _styles() {
@@ -3396,7 +3410,8 @@ class DeviceMapPanel extends HTMLElement {
   }
 
   _cssEscape(value) {
-    return window.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/"/g, '\\"');
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   _styles() {
