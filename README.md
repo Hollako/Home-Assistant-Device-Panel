@@ -217,6 +217,9 @@ integrations:
 areas:
   - Living Room
   - Kitchen
+excluded_entities:
+  - sensor.example_to_ignore
+  - binary_sensor.test_motion
 offline_states:
   - unavailable
   - unknown
@@ -288,5 +291,6 @@ integration_labels:
 - `integrations` use Home Assistant platform names from the entity registry, such as `zha`, `mqtt`, `shelly`, `hue`, or `esphome`.
 - `domain_labels` and `integration_labels` only change display text. Filters still use the original Home Assistant domain/integration values.
 - `areas` can be area names or area IDs.
+- `excluded_entities` removes specific entity IDs from the Offline Device Panel before devices are grouped and counted. In the visual editor, these can be selected from a searchable entity list.
 - The dashboard filters for domains, integrations, and areas support multiple checked values.
 - If an entity is not attached to a device in the registry, the card still shows it as its own fallback item.

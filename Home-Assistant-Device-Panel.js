@@ -1,4 +1,4 @@
-const VERSION = "1.1.10";
+const VERSION = "1.1.15";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -41,6 +41,7 @@ class OfflineDevicePanel extends HTMLElement {
       domains: [],
       integrations: [],
       areas: [],
+      excluded_entities: [],
       domain_labels: {},
       integration_labels: {},
       force_simple: false,
@@ -159,9 +160,11 @@ class OfflineDevicePanel extends HTMLElement {
     const entityRegistry = new Map(this._entities.map((entity) => [entity.entity_id, entity]));
     const deviceRegistry = new Map(this._devices.map((device) => [device.id, device]));
     const areaRegistry = new Map(this._areas.map((area) => [area.area_id || area.id, area]));
+    const excludedEntities = new Set((this._config.excluded_entities || []).map((entityId) => String(entityId).trim()).filter(Boolean));
     const grouped = new Map();
 
     for (const [entityId, stateObj] of Object.entries(this._hass.states)) {
+      if (excludedEntities.has(entityId)) continue;
       const domain = entityId.split(".")[0];
       if (this._config.domains.length && !this._config.domains.includes(domain)) continue;
 
@@ -340,11 +343,11 @@ class OfflineDevicePanel extends HTMLElement {
           ${offlineCount ? this._alertTemplate(offlineCount, offlineAreas) : ""}
 
           <section class="filters">
-            ${this._select("status", "Status", this._statusOptions())}
+            ${this._singleChoice("status", "Status", this._statusOptions())}
             ${
               this._config.force_simple
                 ? ""
-                : this._select("displayMode", "Card style", [
+                : this._singleChoice("displayMode", "Card style", [
                     ["detailed", "Detailed"],
                     ["simple", "Simple"],
                   ])
@@ -381,6 +384,17 @@ class OfflineDevicePanel extends HTMLElement {
         if (event.target.checked) selected.add(value);
         else selected.delete(value);
         this._filters[key] = [...selected].sort((a, b) => a.localeCompare(b));
+        this._saveFilters();
+        this._render({ preserveScroll: true });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-single-filter]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        const key = event.currentTarget.dataset.singleFilter;
+        this._filters[key] = event.currentTarget.dataset.singleValue;
+        this._openMulti = null;
         this._saveFilters();
         this._render({ preserveScroll: true });
       });
@@ -543,6 +557,37 @@ class OfflineDevicePanel extends HTMLElement {
         <span>${this._escape(label)}</span>
         <select data-filter="${this._escape(key)}">${optionHtml}</select>
       </label>
+    `;
+  }
+
+  _singleChoice(key, label, options) {
+    const currentValue = this._filters[key];
+    const selected = options.find(([value]) => value === currentValue) || options[0] || ["", ""];
+    const optionHtml = options
+      .map(
+        ([value, text]) => `
+          <button
+            type="button"
+            class="single-option ${value === currentValue ? "active" : ""}"
+            data-single-filter="${this._escape(key)}"
+            data-single-value="${this._escape(value)}"
+          >
+            ${this._escape(text)}
+          </button>
+        `
+      )
+      .join("");
+
+    return `
+      <div class="multi">
+        <span class="filter-label">${this._escape(label)}</span>
+        <details data-multi-details="${this._escape(key)}" ${this._openMulti === key ? "open" : ""}>
+          <summary>${this._escape(selected[1])}</summary>
+          <div class="multi-menu" data-multi-menu="${this._escape(key)}">
+            ${optionHtml}
+          </div>
+        </details>
+      </div>
     `;
   }
 
@@ -933,7 +978,7 @@ class OfflineDevicePanel extends HTMLElement {
           padding: 0 8px;
         }
 
-        .check-row:hover, .clear:hover {
+        .check-row:hover, .clear:hover, .single-option:hover {
           background: var(--secondary-background-color, #f7f8fa);
         }
 
@@ -963,6 +1008,25 @@ class OfflineDevicePanel extends HTMLElement {
           min-height: 34px;
           padding: 0 8px;
           text-align: left;
+        }
+
+        .single-option {
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          min-height: 34px;
+          padding: 0 8px;
+          text-align: left;
+          width: 100%;
+        }
+
+        .single-option.active {
+          color: var(--primary-color, #03a9f4);
+          font-weight: 800;
         }
 
         .no-options {
@@ -1219,16 +1283,24 @@ class DevicePanelConfigEditor extends HTMLElement {
 
   _multiPicker(key, label, options, config = {}) {
     const selected = new Set(Array.isArray(this._config?.[key]) ? this._config[key] : []);
-    const mergedOptions = [...new Set([...(options || []), ...selected])].filter(Boolean).sort((a, b) => a.localeCompare(b));
+    const optionMap = new Map();
+    (options || []).forEach((option) => {
+      const [value, text] = Array.isArray(option) ? option : [option, option];
+      if (value) optionMap.set(String(value), String(text || value));
+    });
+    selected.forEach((value) => {
+      if (value && !optionMap.has(value)) optionMap.set(value, value);
+    });
+    const mergedOptions = [...optionMap.entries()].sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
     const labels = config.labelKey ? this._config?.[config.labelKey] || {} : {};
     const choices = mergedOptions.length
       ? mergedOptions
           .map(
-            (value) => `
-              <div class="choice ${config.labelKey ? "with-alias" : ""}">
+            ([value, text]) => `
+              <div class="choice ${config.labelKey ? "with-alias" : ""}" data-picker-choice="${this._escape(key)}" data-search-text="${this._escape(`${value} ${text}`.toLowerCase())}">
                 <label>
                   <input type="checkbox" data-config-multi="${this._escape(key)}" value="${this._escape(value)}" ${selected.has(value) ? "checked" : ""} />
-                  <span>${this._escape(value)}</span>
+                  <span title="${this._escape(value)}">${this._escape(text)}</span>
                 </label>
                 ${
                   config.labelKey
@@ -1247,6 +1319,7 @@ class DevicePanelConfigEditor extends HTMLElement {
           <span>${this._escape(label)}</span>
           <button type="button" data-clear-multi="${this._escape(key)}">All</button>
         </div>
+        ${config.search ? `<input class="picker-search" data-picker-search="${this._escape(key)}" placeholder="${this._escape(config.searchPlaceholder || "Search...")}" />` : ""}
         <div class="choice-grid">${choices}</div>
       </div>
     `;
@@ -1355,6 +1428,10 @@ class DevicePanelConfigEditor extends HTMLElement {
           padding: 6px;
         }
 
+        .picker-search {
+          min-height: 36px;
+        }
+
         .choice {
           align-items: center;
           border-radius: 4px;
@@ -1403,6 +1480,75 @@ class DevicePanelConfigEditor extends HTMLElement {
           color: var(--secondary-text-color);
           font-size: 12px;
           padding: 8px;
+        }
+
+        .selected-list {
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 6px;
+          display: grid;
+          gap: 6px;
+          padding: 8px;
+        }
+
+        .selected-row {
+          align-items: center;
+          display: grid;
+          gap: 8px;
+          grid-template-columns: 1fr auto;
+        }
+
+        .selected-row span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .remove-chip {
+          background: transparent;
+          border: 1px solid var(--divider-color, #d8dde6);
+          color: var(--primary-text-color);
+          min-height: 30px;
+          padding: 4px 10px;
+        }
+
+        .modal-backdrop {
+          align-items: center;
+          background: rgba(0, 0, 0, 0.42);
+          display: flex;
+          inset: 0;
+          justify-content: center;
+          padding: 18px;
+          position: fixed;
+          z-index: 1000;
+        }
+
+        .modal {
+          background: var(--card-background-color, #fff);
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 8px;
+          box-shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
+          display: grid;
+          gap: 12px;
+          max-height: min(720px, 86vh);
+          max-width: 720px;
+          padding: 14px;
+          width: min(720px, 100%);
+        }
+
+        .modal .choice-grid {
+          max-height: min(560px, 58vh);
+        }
+
+        .modal-head {
+          align-items: center;
+          display: flex;
+          gap: 10px;
+          justify-content: space-between;
+        }
+
+        .modal-head strong {
+          font-size: 16px;
         }
 
         button {
@@ -1465,6 +1611,18 @@ class DevicePanelConfigEditor extends HTMLElement {
     });
   }
 
+  _wirePickerSearch() {
+    this.shadowRoot.querySelectorAll("[data-picker-search]").forEach((element) => {
+      element.addEventListener("input", (event) => {
+        const key = event.currentTarget.dataset.pickerSearch;
+        const query = event.currentTarget.value.trim().toLowerCase();
+        this.shadowRoot.querySelectorAll(`[data-picker-choice="${this._cssEscape(key)}"]`).forEach((choice) => {
+          choice.style.display = query && !String(choice.dataset.searchText || "").includes(query) ? "none" : "";
+        });
+      });
+    });
+  }
+
   _wireLabelInputs() {
     this.shadowRoot.querySelectorAll("[data-config-label]").forEach((element) => {
       element.addEventListener("change", (event) => {
@@ -1510,6 +1668,7 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
     this._areas = [];
     this._registriesLoaded = false;
     this._optionsSignature = "";
+    this._excludedPickerOpen = false;
   }
 
   setConfig(config) {
@@ -1522,6 +1681,7 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
       domains: [],
       integrations: [],
       areas: [],
+      excluded_entities: [],
       domain_labels: {},
       integration_labels: {},
       force_simple: false,
@@ -1582,11 +1742,18 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
           ${this._multiPicker("integrations", "Integrations to include", this._integrationOptions(), { labelKey: "integration_labels", placeholder: "Custom integration name" })}
           ${this._multiPicker("areas", "Areas to include", this._areaOptions())}
         </fieldset>
+        <fieldset>
+          <legend>Excluded Entities</legend>
+          ${this._excludedEntitiesTemplate()}
+        </fieldset>
+        ${this._excludedPickerOpen ? this._excludedEntityModal() : ""}
       </div>
     `;
     this._wireBasicInputs(["offline_states"]);
     this._wireMultiPickers();
+    this._wirePickerSearch();
     this._wireLabelInputs();
+    this._wireExcludedEntityPicker();
   }
 
   _renderEditorIfOptionsChanged() {
@@ -1601,6 +1768,7 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
       domains: this._domainOptions(),
       integrations: this._integrationOptions(),
       areas: this._areaOptions(),
+      entities: this._entityOptions(),
     });
   }
 
@@ -1625,6 +1793,79 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
       .flatMap((stateObj) => [stateObj.attributes?.area, stateObj.attributes?.area_id])
       .filter(Boolean);
     return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _entityOptions() {
+    const states = this._hass?.states || {};
+    const registryNames = new Map(this._entities.map((entity) => [entity.entity_id, entity.name || entity.original_name || ""]));
+    return Object.entries(states)
+      .map(([entityId, stateObj]) => {
+        const name = stateObj.attributes?.friendly_name || registryNames.get(entityId) || entityId;
+        return [entityId, `${name} (${entityId})`];
+      })
+      .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+  }
+
+  _excludedEntitiesTemplate() {
+    const selected = Array.isArray(this._config.excluded_entities) ? this._config.excluded_entities : [];
+    const labels = new Map(this._entityOptions());
+    const rows = selected.length
+      ? selected
+          .map(
+            (entityId) => `
+              <div class="selected-row">
+                <span title="${this._escape(entityId)}">${this._escape(labels.get(entityId) || entityId)}</span>
+                <button type="button" class="remove-chip" data-remove-excluded="${this._escape(entityId)}">Remove</button>
+              </div>
+            `
+          )
+          .join("")
+      : `<div class="empty-options">No excluded entities selected</div>`;
+
+    return `
+      <div class="selected-list">${rows}</div>
+      <button type="button" data-open-excluded-picker>Add entities</button>
+    `;
+  }
+
+  _excludedEntityModal() {
+    return `
+      <div class="modal-backdrop" data-close-excluded-picker>
+        <div class="modal" role="dialog" aria-modal="true" aria-label="Add excluded entities" data-excluded-modal>
+          <div class="modal-head">
+            <strong>Add excluded entities</strong>
+            <button type="button" data-close-excluded-picker>Done</button>
+          </div>
+          ${this._multiPicker("excluded_entities", "Entities", this._entityOptions(), { search: true, searchPlaceholder: "Search entities..." })}
+        </div>
+      </div>
+    `;
+  }
+
+  _wireExcludedEntityPicker() {
+    this.shadowRoot.querySelectorAll("[data-open-excluded-picker]").forEach((element) => {
+      element.addEventListener("click", () => {
+        this._excludedPickerOpen = true;
+        this._renderEditor();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-close-excluded-picker]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        if (event.target.closest?.("[data-excluded-modal]") && !event.target.matches("[data-close-excluded-picker]")) return;
+        this._excludedPickerOpen = false;
+        this._renderEditor();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-remove-excluded]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        const entityId = event.currentTarget.dataset.removeExcluded;
+        const excluded = (this._config.excluded_entities || []).filter((value) => value !== entityId);
+        this._emitConfig({ ...this._config, excluded_entities: excluded });
+        this._renderEditor();
+      });
+    });
   }
 }
 
