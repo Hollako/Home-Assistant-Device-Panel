@@ -1,4 +1,4 @@
-const VERSION = "1.1.15";
+const VERSION = "1.1.16";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -1929,7 +1929,11 @@ class DeviceMapPanel extends HTMLElement {
       top: 0,
       leftRatio: 0,
       topRatio: 0,
+      centerX: 0.5,
+      centerY: 0.5,
+      zoom: 1,
     };
+    this._mapScrollByFloor = {};
     this._mapAlertScrollLeft = 0;
     this._deviceListScrollTop = 0;
     this._isPanning = false;
@@ -2739,12 +2743,14 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("change", (event) => {
         const floorId = event.currentTarget.value;
         if (!this._floors.some((floor) => floor.id === floorId)) return;
+        this._captureMapScroll();
+        this._mapScrollByFloor[this._activeFloorId] = { ...this._mapScroll };
         this._floorMarkers[this._activeFloorId] = this._markers;
         this._activeFloorId = floorId;
         this._markers = this._floorMarkers[floorId] || {};
         this._selectedMarkers.clear();
         this._selectionBox = null;
-        this._mapScroll = { left: 0, top: 0, leftRatio: 0, topRatio: 0 };
+        this._mapScroll = this._mapScrollByFloor[floorId] || { left: 0, top: 0, leftRatio: 0, topRatio: 0, centerX: 0.5, centerY: 0.5, zoom: this._zoom };
         this._render();
       });
     });
@@ -3082,12 +3088,18 @@ class DeviceMapPanel extends HTMLElement {
     if (!map) return;
     const maxLeft = Math.max(0, map.scrollWidth - map.clientWidth);
     const maxTop = Math.max(0, map.scrollHeight - map.clientHeight);
+    const centerX = map.scrollWidth ? (map.scrollLeft + map.clientWidth / 2) / map.scrollWidth : 0.5;
+    const centerY = map.scrollHeight ? (map.scrollTop + map.clientHeight / 2) / map.scrollHeight : 0.5;
     this._mapScroll = {
       left: map.scrollLeft,
       top: map.scrollTop,
       leftRatio: maxLeft ? map.scrollLeft / maxLeft : 0,
       topRatio: maxTop ? map.scrollTop / maxTop : 0,
+      centerX,
+      centerY,
+      zoom: this._zoom,
     };
+    this._mapScrollByFloor[this._activeFloorId || "default"] = { ...this._mapScroll };
   }
 
   _restoreMapScroll() {
@@ -3095,8 +3107,9 @@ class DeviceMapPanel extends HTMLElement {
     if (!map) return;
     const maxLeft = Math.max(0, map.scrollWidth - map.clientWidth);
     const maxTop = Math.max(0, map.scrollHeight - map.clientHeight);
-    const left = this._mapScroll.left <= maxLeft ? this._mapScroll.left : maxLeft * (this._mapScroll.leftRatio || 0);
-    const top = this._mapScroll.top <= maxTop ? this._mapScroll.top : maxTop * (this._mapScroll.topRatio || 0);
+    const hasCenter = Number.isFinite(this._mapScroll.centerX) && Number.isFinite(this._mapScroll.centerY);
+    const left = hasCenter ? this._mapScroll.centerX * map.scrollWidth - map.clientWidth / 2 : this._mapScroll.left <= maxLeft ? this._mapScroll.left : maxLeft * (this._mapScroll.leftRatio || 0);
+    const top = hasCenter ? this._mapScroll.centerY * map.scrollHeight - map.clientHeight / 2 : this._mapScroll.top <= maxTop ? this._mapScroll.top : maxTop * (this._mapScroll.topRatio || 0);
     map.scrollLeft = Math.max(0, Math.min(maxLeft, left));
     map.scrollTop = Math.max(0, Math.min(maxTop, top));
     this._positionNudgePad();
