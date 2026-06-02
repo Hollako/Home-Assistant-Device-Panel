@@ -1,4 +1,4 @@
-const VERSION = "2.8.1";
+const VERSION = "2.8.5";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -1923,6 +1923,7 @@ class DeviceMapPanel extends HTMLElement {
       markerSize: 18,
       showLabels: true,
       nudgeStep: 1,
+      mapViewports: {},
     };
     this._mapScroll = {
       left: 0,
@@ -1936,6 +1937,9 @@ class DeviceMapPanel extends HTMLElement {
     this._mapScrollByFloor = {};
     this._mapViewportVersion = 0;
     this._isRestoringMapScroll = false;
+    this._viewportSaveTimer = null;
+    this._hasRenderedWithHass = false;
+    this._registryRenderComplete = false;
     this._mapAlertScrollLeft = 0;
     this._deviceListScrollTop = 0;
     this._isPanning = false;
@@ -1981,8 +1985,11 @@ class DeviceMapPanel extends HTMLElement {
       nudgeStep: this._config.nudge_step,
       ...this._loadDisplay(),
     });
+    this._applyStoredViewportForFloor(this._activeFloorId);
     this._floorMarkers = this._mergedFloorMarkers(this._configFloorMarkers(), this._loadMarkers());
     this._markers = this._floorMarkers[this._activeFloorId] || {};
+    this._hasRenderedWithHass = false;
+    this._registryRenderComplete = false;
     this._render();
   }
 
@@ -1990,7 +1997,13 @@ class DeviceMapPanel extends HTMLElement {
     this._hass = hass;
     this._loadRegistries(hass);
     if (this._isControlActive()) return;
-    this._render({ preservePageScroll: true });
+    if (!this._hasRenderedWithHass || (this._registriesLoaded && !this._registryRenderComplete)) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
+      this._hasRenderedWithHass = true;
+      if (this._registriesLoaded) this._registryRenderComplete = true;
+      return;
+    }
+    this._updateLiveMapState();
   }
 
   getCardSize() {
@@ -2050,7 +2063,9 @@ class DeviceMapPanel extends HTMLElement {
       this._devices = devices || [];
       this._areas = areas || [];
       if (this._isControlActive()) return;
-      this._render();
+      this._render({ preserveMapViewport: true });
+      this._hasRenderedWithHass = true;
+      this._registryRenderComplete = true;
     } catch (error) {
       console.warn("device-map-panel: registry lookup failed", error);
     }
@@ -2518,14 +2533,74 @@ class DeviceMapPanel extends HTMLElement {
       markerSize: Number.isFinite(markerSize) ? Math.max(12, Math.min(48, markerSize)) : 18,
       nudgeStep: Number.isFinite(nudgeStep) ? Math.max(0.05, Math.min(10, nudgeStep)) : 1,
       showLabels: display.showLabels !== false && display.showLabels !== "false",
+      mapViewports: display.mapViewports && typeof display.mapViewports === "object" && !Array.isArray(display.mapViewports) ? display.mapViewports : {},
     };
+  }
+
+  _storedViewportForFloor(floorId = this._activeFloorId || "default") {
+    const viewport = this._display.mapViewports?.[floorId];
+    if (!viewport || typeof viewport !== "object") return null;
+    const zoom = Number(viewport.zoom);
+    const centerX = Number(viewport.centerX);
+    const centerY = Number(viewport.centerY);
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return null;
+    return {
+      centerX: Math.max(0, Math.min(1, centerX)),
+      centerY: Math.max(0, Math.min(1, centerY)),
+      zoom: Number.isFinite(zoom) ? Math.max(0.5, Math.min(4, zoom)) : this._zoom,
+    };
+  }
+
+  _applyStoredViewportForFloor(floorId = this._activeFloorId || "default") {
+    const viewport = this._storedViewportForFloor(floorId);
+    if (!viewport) return;
+    this._zoom = viewport.zoom;
+    this._mapScroll = {
+      left: 0,
+      top: 0,
+      leftRatio: 0,
+      topRatio: 0,
+      centerX: viewport.centerX,
+      centerY: viewport.centerY,
+      zoom: viewport.zoom,
+    };
+    this._mapScrollByFloor[floorId] = { ...this._mapScroll };
+  }
+
+  _rememberMapViewport({ save = false } = {}) {
+    const floorId = this._activeFloorId || "default";
+    const centerX = Number.isFinite(this._mapScroll.centerX) ? Math.max(0, Math.min(1, this._mapScroll.centerX)) : 0.5;
+    const centerY = Number.isFinite(this._mapScroll.centerY) ? Math.max(0, Math.min(1, this._mapScroll.centerY)) : 0.5;
+    this._display.mapViewports = {
+      ...(this._display.mapViewports || {}),
+      [floorId]: {
+        centerX,
+        centerY,
+        zoom: this._zoom,
+      },
+    };
+    if (save) this._saveDisplay();
+    else this._scheduleViewportSave();
+  }
+
+  _scheduleViewportSave() {
+    if (this._config.persist_layout === false) return;
+    if (this._viewportSaveTimer) window.clearTimeout(this._viewportSaveTimer);
+    this._viewportSaveTimer = window.setTimeout(() => {
+      this._viewportSaveTimer = null;
+      this._saveDisplay();
+    }, 250);
   }
 
   _render(options = {}) {
     if (!this.shadowRoot) return;
 
     const pageScrollSnapshots = options.preservePageScroll ? this._scrollSnapshots() : [];
-    this._captureMapScroll();
+    if (options.preserveMapViewport) {
+      this._applyStoredViewportForFloor(this._activeFloorId);
+    } else {
+      this._captureMapScroll();
+    }
     this._captureMapAlertScroll();
     this._captureDeviceListScroll();
     const activeElement = this.shadowRoot.activeElement;
@@ -2752,6 +2827,7 @@ class DeviceMapPanel extends HTMLElement {
         this._markers = this._floorMarkers[floorId] || {};
         this._selectedMarkers.clear();
         this._selectionBox = null;
+        this._applyStoredViewportForFloor(floorId);
         this._mapScroll = this._mapScrollByFloor[floorId] || { left: 0, top: 0, leftRatio: 0, topRatio: 0, centerX: 0.5, centerY: 0.5, zoom: this._zoom };
         this._render();
       });
@@ -3105,6 +3181,7 @@ class DeviceMapPanel extends HTMLElement {
       zoom: this._zoom,
     };
     this._mapScrollByFloor[this._activeFloorId || "default"] = { ...this._mapScroll };
+    this._rememberMapViewport();
   }
 
   _restoreMapScroll() {
@@ -3135,6 +3212,7 @@ class DeviceMapPanel extends HTMLElement {
     requestAnimationFrame(restoreIfCurrent);
     window.setTimeout(restoreIfCurrent, 80);
     window.setTimeout(restoreIfCurrent, 250);
+    window.setTimeout(restoreIfCurrent, 750);
   }
 
   _captureMapAlertScroll() {
@@ -3292,6 +3370,7 @@ class DeviceMapPanel extends HTMLElement {
       emptyPointerActive = false;
       this._isPanning = false;
       this._captureMapScroll();
+      this._rememberMapViewport({ save: true });
       map.classList.remove("panning");
       try {
         map.releasePointerCapture?.(event.pointerId);
@@ -3473,6 +3552,48 @@ class DeviceMapPanel extends HTMLElement {
     `;
   }
 
+  _updateLiveMapState() {
+    if (!this.shadowRoot?.querySelector("[data-map]")) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
+      return;
+    }
+
+    const rows = this._deviceRows();
+    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const isEditing = this._canEdit() && this._mode === "edit";
+    let offlineCount = 0;
+    let placedCount = 0;
+
+    for (const [key] of Object.entries(this._markers || {})) {
+      const row = rowByKey.get(key);
+      if (!row) continue;
+      placedCount += 1;
+      if (row.offline) offlineCount += 1;
+      const marker = this.shadowRoot.querySelector(`[data-marker="${this._cssEscape(key)}"]`);
+      if (!marker) continue;
+      const stateClass = this._stateClass(row);
+      marker.classList.toggle("offline", row.offline);
+      marker.classList.toggle("online", !row.offline);
+      marker.classList.toggle("state-active", stateClass === "state-active");
+      marker.classList.toggle("state-inactive", stateClass === "state-inactive");
+      marker.classList.toggle("state-neutral", stateClass === "state-neutral");
+      marker.classList.toggle("selected", isEditing && this._selectedMarkers.has(key));
+      marker.title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+      marker.dataset.entity = row.entityId;
+      const icon = marker.querySelector("ha-icon");
+      icon?.setAttribute("icon", this._markerIcon(row));
+      const label = marker.querySelector("strong");
+      if (label) label.textContent = row.name;
+    }
+
+    const sidebarStatus = this.shadowRoot.querySelector(".sidebar-status");
+    if (sidebarStatus) {
+      sidebarStatus.textContent = `${isEditing ? "Edit Mode" : "User Mode"} - v${VERSION} - ${placedCount} placed / ${offlineCount} offline`;
+    }
+
+    this._captureMapScroll();
+  }
+
   _jumpToMarker(floorId, markerKey) {
     if (!floorId || !markerKey || !this._floors.some((floor) => floor.id === floorId)) return;
     if (floorId === this._activeFloorId) {
@@ -3508,6 +3629,7 @@ class DeviceMapPanel extends HTMLElement {
       map.scrollLeft = Math.max(0, Math.min(maxLeft, targetLeft));
       map.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
       this._captureMapScroll();
+      this._rememberMapViewport({ save: true });
     }
     if (slider) slider.value = String(zoomPercent);
     if (output) output.textContent = `${zoomPercent}%`;
