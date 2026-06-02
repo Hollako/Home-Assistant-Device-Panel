@@ -1,4 +1,4 @@
-const VERSION = "1.1.17";
+const VERSION = "2.7.1";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
