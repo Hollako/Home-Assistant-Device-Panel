@@ -1,4 +1,4 @@
-const VERSION = "1.1.16";
+const VERSION = "1.1.17";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -1934,6 +1934,8 @@ class DeviceMapPanel extends HTMLElement {
       zoom: 1,
     };
     this._mapScrollByFloor = {};
+    this._mapViewportVersion = 0;
+    this._isRestoringMapScroll = false;
     this._mapAlertScrollLeft = 0;
     this._deviceListScrollTop = 0;
     this._isPanning = false;
@@ -2553,7 +2555,7 @@ class DeviceMapPanel extends HTMLElement {
             isEditing && !this._sidebarCollapsed
               ? `
           <aside>
-            <div class="sidebar-status">${this._escape(modeLabel)} - ${placedRows.length} placed / ${offlineCount} offline</div>
+            <div class="sidebar-status">${this._escape(modeLabel)} - v${this._escape(VERSION)} - ${placedRows.length} placed / ${offlineCount} offline</div>
             <section class="filters">
               ${this._select("placementStatus", "Placement", [
                 ["all", "All placements"],
@@ -2774,6 +2776,7 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("click", (event) => {
         const action = event.currentTarget.dataset.zoom;
         if (action === "reset") this._zoom = 1;
+        this._mapViewportVersion += 1;
         this._applyZoomToDom();
       });
     });
@@ -2782,6 +2785,7 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("input", (event) => {
         const value = Number(event.currentTarget.value);
         this._zoom = Math.max(0.5, Math.min(4, value / 100));
+        this._mapViewportVersion += 1;
         this._applyZoomToDom();
       });
     });
@@ -2810,6 +2814,7 @@ class DeviceMapPanel extends HTMLElement {
     const map = this.shadowRoot.querySelector("[data-map]");
     if (map) {
       map.addEventListener("scroll", () => {
+        if (!this._isRestoringMapScroll) this._mapViewportVersion += 1;
         this._captureMapScroll();
         this._positionNudgePad();
       });
@@ -3110,17 +3115,26 @@ class DeviceMapPanel extends HTMLElement {
     const hasCenter = Number.isFinite(this._mapScroll.centerX) && Number.isFinite(this._mapScroll.centerY);
     const left = hasCenter ? this._mapScroll.centerX * map.scrollWidth - map.clientWidth / 2 : this._mapScroll.left <= maxLeft ? this._mapScroll.left : maxLeft * (this._mapScroll.leftRatio || 0);
     const top = hasCenter ? this._mapScroll.centerY * map.scrollHeight - map.clientHeight / 2 : this._mapScroll.top <= maxTop ? this._mapScroll.top : maxTop * (this._mapScroll.topRatio || 0);
+    this._isRestoringMapScroll = true;
     map.scrollLeft = Math.max(0, Math.min(maxLeft, left));
     map.scrollTop = Math.max(0, Math.min(maxTop, top));
+    window.setTimeout(() => {
+      this._isRestoringMapScroll = false;
+    }, 0);
     this._positionNudgePad();
   }
 
   _restoreMapScrollSoon() {
     if (Date.now() < this._suppressMapRestoreUntil) return;
-    this._restoreMapScroll();
-    requestAnimationFrame(() => this._restoreMapScroll());
-    window.setTimeout(() => this._restoreMapScroll(), 80);
-    window.setTimeout(() => this._restoreMapScroll(), 250);
+    const restoreVersion = this._mapViewportVersion;
+    const restoreIfCurrent = () => {
+      if (restoreVersion !== this._mapViewportVersion) return;
+      this._restoreMapScroll();
+    };
+    restoreIfCurrent();
+    requestAnimationFrame(restoreIfCurrent);
+    window.setTimeout(restoreIfCurrent, 80);
+    window.setTimeout(restoreIfCurrent, 250);
   }
 
   _captureMapAlertScroll() {
@@ -3235,6 +3249,7 @@ class DeviceMapPanel extends HTMLElement {
       if (Math.hypot(event.clientX - startX, event.clientY - startY) > 4) moved = true;
       map.scrollLeft = startLeft - (event.clientX - startX);
       map.scrollTop = startTop - (event.clientY - startY);
+      this._mapViewportVersion += 1;
       this._captureMapScroll();
     };
 
