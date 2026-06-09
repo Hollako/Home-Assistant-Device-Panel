@@ -30,7 +30,7 @@ type: module
 
 The HACS release uses a single JavaScript file, so updates only need to refresh `Home-Assistant-Device-Panel.js`.
 
-7. Add a manual Lovelace card:
+7. Add the card from the Lovelace card picker and configure the main options in the visual editor. You can also add a manual Lovelace card:
 
 ```yaml
 type: custom:offline-device-panel
@@ -64,6 +64,16 @@ offline_states:
   - unavailable
   - unknown
 ```
+
+## UI Configuration
+
+Both cards include a visual Lovelace editor for the common options, including title, display mode, force simple mode, online visibility, display settings, and offline states.
+
+Domains, integrations, and areas can be selected from checkbox lists populated from the current Home Assistant entities and registries. Leaving a list empty means the card includes all values for that option.
+
+Both editors also include optional custom-name fields beside domains and integrations. Empty custom-name fields use the default Home Assistant/domain name.
+
+The Device Map Panel keeps floor images and marker layout in a YAML field inside the visual editor. Use **Floors and Markers** for the `floors:` layout, then apply it from the editor. You can still use the map's **Export YAML** tool after placing markers.
 
 ## Device Map Panel
 
@@ -166,15 +176,6 @@ floors:
         y: 58.00
 ```
 
-If you use multiple map cards with the same title on the same dashboard, set a unique `storage_key` for each one:
-
-```yaml
-type: custom:device-map-panel
-title: First Floor
-image: /local/first-floor.png
-storage_key: first-floor-map
-```
-
 To always load marker positions from YAML only, disable browser layout persistence:
 
 ```yaml
@@ -216,6 +217,9 @@ integrations:
 areas:
   - Living Room
   - Kitchen
+excluded_entities:
+  - sensor.example_to_ignore
+  - binary_sensor.test_motion
 offline_states:
   - unavailable
   - unknown
@@ -287,5 +291,6 @@ integration_labels:
 - `integrations` use Home Assistant platform names from the entity registry, such as `zha`, `mqtt`, `shelly`, `hue`, or `esphome`.
 - `domain_labels` and `integration_labels` only change display text. Filters still use the original Home Assistant domain/integration values.
 - `areas` can be area names or area IDs.
+- `excluded_entities` removes specific entity IDs from the Offline Device Panel before devices are grouped and counted. In the visual editor, these can be selected from a searchable entity list.
 - The dashboard filters for domains, integrations, and areas support multiple checked values.
 - If an entity is not attached to a device in the registry, the card still shows it as its own fallback item.

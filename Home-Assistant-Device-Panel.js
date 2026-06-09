@@ -1,4 +1,4 @@
-const VERSION = "1.0.10";
+const VERSION = "2.8.5";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -32,7 +32,7 @@ class OfflineDevicePanel extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = {
+    const nextConfig = {
       title: "Offline Devices",
       show_online: true,
       display_mode: "detailed",
@@ -41,12 +41,14 @@ class OfflineDevicePanel extends HTMLElement {
       domains: [],
       integrations: [],
       areas: [],
+      excluded_entities: [],
       domain_labels: {},
       integration_labels: {},
       force_simple: false,
       persist_filters: true,
       ...config,
     };
+    this._config = nextConfig;
     this._filters = this._normalizedFilters({
       ...this._defaultFilters(),
       ...this._loadFilters(),
@@ -57,7 +59,8 @@ class OfflineDevicePanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._loadRegistries(hass);
-    this._render();
+    if (this._isControlActive()) return;
+    this._render({ preserveScroll: true });
   }
 
   getCardSize() {
@@ -139,10 +142,16 @@ class OfflineDevicePanel extends HTMLElement {
       this._entities = entities || [];
       this._devices = devices || [];
       this._areas = areas || [];
-      this._render();
+      if (this._isControlActive()) return;
+      this._render({ preserveScroll: true });
     } catch (error) {
       console.warn("offline-device-panel: registry lookup failed", error);
     }
+  }
+
+  _isControlActive() {
+    const active = this.shadowRoot?.activeElement || document.activeElement;
+    return Boolean(this._openMulti) || ["INPUT", "SELECT", "TEXTAREA", "SUMMARY"].includes(active?.tagName);
   }
 
   _deviceRows() {
@@ -151,9 +160,11 @@ class OfflineDevicePanel extends HTMLElement {
     const entityRegistry = new Map(this._entities.map((entity) => [entity.entity_id, entity]));
     const deviceRegistry = new Map(this._devices.map((device) => [device.id, device]));
     const areaRegistry = new Map(this._areas.map((area) => [area.area_id || area.id, area]));
+    const excludedEntities = new Set((this._config.excluded_entities || []).map((entityId) => String(entityId).trim()).filter(Boolean));
     const grouped = new Map();
 
     for (const [entityId, stateObj] of Object.entries(this._hass.states)) {
+      if (excludedEntities.has(entityId)) continue;
       const domain = entityId.split(".")[0];
       if (this._config.domains.length && !this._config.domains.includes(domain)) continue;
 
@@ -372,7 +383,8 @@ class OfflineDevicePanel extends HTMLElement {
     const rows = this._filteredRows();
     const offlineCount = allRows.filter((row) => row.offline).length;
     const onlineCount = allRows.length - offlineCount;
-    const statusText = `${offlineCount} offline / ${onlineCount} online`;
+    const totalCount = allRows.length;
+    const statusText = `${offlineCount} offline / ${onlineCount} online / ${totalCount} total`;
     const offlineAreas = this._offlineAreaSummary(allRows);
 
     this.shadowRoot.innerHTML = `
@@ -390,11 +402,11 @@ class OfflineDevicePanel extends HTMLElement {
           ${offlineCount ? this._alertTemplate(offlineCount, offlineAreas) : ""}
 
           <section class="filters">
-            ${this._select("status", "Status", this._statusOptions())}
+            ${this._singleChoice("status", "Status", this._statusOptions())}
             ${
               this._config.force_simple
                 ? ""
-                : this._select("displayMode", "Card style", [
+                : this._singleChoice("displayMode", "Card style", [
                     ["detailed", "Detailed"],
                     ["simple", "Simple"],
                   ])
@@ -431,6 +443,17 @@ class OfflineDevicePanel extends HTMLElement {
         if (event.target.checked) selected.add(value);
         else selected.delete(value);
         this._filters[key] = [...selected].sort((a, b) => a.localeCompare(b));
+        this._saveFilters();
+        this._render({ preserveScroll: true });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-single-filter]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        const key = event.currentTarget.dataset.singleFilter;
+        this._filters[key] = event.currentTarget.dataset.singleValue;
+        this._openMulti = null;
         this._saveFilters();
         this._render({ preserveScroll: true });
       });
@@ -488,7 +511,7 @@ class OfflineDevicePanel extends HTMLElement {
 
     if (preserveScroll || activeFilter) {
       requestAnimationFrame(() => {
-        if (preserveScroll) this._restoreScroll(scrollSnapshots);
+        if (preserveScroll) this._restoreScrollSoon(scrollSnapshots);
         if (activeFilter) {
           const restoredInput = this.shadowRoot.querySelector(`[data-filter="${this._cssEscape(activeFilter)}"]`);
           restoredInput?.focus();
@@ -496,10 +519,7 @@ class OfflineDevicePanel extends HTMLElement {
             restoredInput?.setSelectionRange?.(selectionStart, selectionEnd);
           }
         }
-        if (this._openMulti) {
-          const restoredMenu = this.shadowRoot.querySelector(`[data-multi-menu="${this._openMulti}"]`);
-          if (restoredMenu) restoredMenu.scrollTo(menuScrollLeft, menuScrollTop);
-        }
+        if (this._openMulti) this._restoreOpenMultiSoon(menuScrollLeft, menuScrollTop);
       });
     }
   }
@@ -557,6 +577,27 @@ class OfflineDevicePanel extends HTMLElement {
     }
   }
 
+  _restoreScrollSoon(snapshots) {
+    this._restoreScroll(snapshots);
+    requestAnimationFrame(() => this._restoreScroll(snapshots));
+    window.setTimeout(() => this._restoreScroll(snapshots), 80);
+  }
+
+  _restoreOpenMulti(scrollLeft = 0, scrollTop = 0) {
+    if (!this._openMulti || !this.shadowRoot) return;
+    const details = this.shadowRoot.querySelector(`[data-multi-details="${this._cssEscape(this._openMulti)}"]`);
+    if (details) details.open = true;
+    const menu = this.shadowRoot.querySelector(`[data-multi-menu="${this._cssEscape(this._openMulti)}"]`);
+    if (menu) menu.scrollTo(scrollLeft, scrollTop);
+  }
+
+  _restoreOpenMultiSoon(scrollLeft = 0, scrollTop = 0) {
+    this._restoreOpenMulti(scrollLeft, scrollTop);
+    requestAnimationFrame(() => this._restoreOpenMulti(scrollLeft, scrollTop));
+    window.setTimeout(() => this._restoreOpenMulti(scrollLeft, scrollTop), 80);
+    window.setTimeout(() => this._restoreOpenMulti(scrollLeft, scrollTop), 250);
+  }
+
   _statusOptions() {
     const options = [["offline", "Offline"]];
     if (this._config.show_online !== false) {
@@ -575,6 +616,37 @@ class OfflineDevicePanel extends HTMLElement {
         <span>${this._escape(label)}</span>
         <select data-filter="${this._escape(key)}">${optionHtml}</select>
       </label>
+    `;
+  }
+
+  _singleChoice(key, label, options) {
+    const currentValue = this._filters[key];
+    const selected = options.find(([value]) => value === currentValue) || options[0] || ["", ""];
+    const optionHtml = options
+      .map(
+        ([value, text]) => `
+          <button
+            type="button"
+            class="single-option ${value === currentValue ? "active" : ""}"
+            data-single-filter="${this._escape(key)}"
+            data-single-value="${this._escape(value)}"
+          >
+            ${this._escape(text)}
+          </button>
+        `
+      )
+      .join("");
+
+    return `
+      <div class="multi">
+        <span class="filter-label">${this._escape(label)}</span>
+        <details data-multi-details="${this._escape(key)}" ${this._openMulti === key ? "open" : ""}>
+          <summary>${this._escape(selected[1])}</summary>
+          <div class="multi-menu" data-multi-menu="${this._escape(key)}">
+            ${optionHtml}
+          </div>
+        </details>
+      </div>
     `;
   }
 
@@ -723,7 +795,8 @@ class OfflineDevicePanel extends HTMLElement {
   }
 
   _cssEscape(value) {
-    return window.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/"/g, '\\"');
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   _styles() {
@@ -968,7 +1041,7 @@ class OfflineDevicePanel extends HTMLElement {
           padding: 0 8px;
         }
 
-        .check-row:hover, .clear:hover {
+        .check-row:hover, .clear:hover, .single-option:hover {
           background: var(--secondary-background-color, #f7f8fa);
         }
 
@@ -998,6 +1071,25 @@ class OfflineDevicePanel extends HTMLElement {
           min-height: 34px;
           padding: 0 8px;
           text-align: left;
+        }
+
+        .single-option {
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          min-height: 34px;
+          padding: 0 8px;
+          text-align: left;
+          width: 100%;
+        }
+
+        .single-option.active {
+          color: var(--primary-color, #03a9f4);
+          font-weight: 800;
         }
 
         .no-options {
@@ -1205,14 +1297,665 @@ class OfflineDevicePanel extends HTMLElement {
 
 customElements.define("offline-device-panel", OfflineDevicePanel);
 
-class OfflineDevicePanelEditor extends HTMLElement {
-  setConfig(config) {
-    this._config = config;
-    this.innerHTML = `
-      <div style="padding: 12px; color: var(--primary-text-color);">
-        Configure this card in YAML for domain, integration, area, and offline state filters.
+class DevicePanelConfigEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._handleHassChanged?.(hass);
+  }
+
+  _escape(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  _arrayText(value) {
+    return Array.isArray(value) ? value.join("\n") : "";
+  }
+
+  _arrayFromText(value) {
+    return String(value || "")
+      .split(/[\n,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  _field(key, label, options = {}) {
+    const type = options.type || "text";
+    const value = this._config?.[key] ?? options.defaultValue ?? "";
+    return `
+      <label>
+        <span>${this._escape(label)}</span>
+        <input data-config-key="${this._escape(key)}" type="${this._escape(type)}" value="${this._escape(value)}" ${options.min !== undefined ? `min="${this._escape(options.min)}"` : ""} ${options.max !== undefined ? `max="${this._escape(options.max)}"` : ""} ${options.step !== undefined ? `step="${this._escape(options.step)}"` : ""} />
+      </label>
+    `;
+  }
+
+  _textarea(key, label, options = {}) {
+    const value = options.value !== undefined ? options.value : this._arrayText(this._config?.[key]);
+    return `
+      <label>
+        <span>${this._escape(label)}</span>
+        <textarea data-config-key="${this._escape(key)}" rows="${this._escape(options.rows || 4)}">${this._escape(value)}</textarea>
+      </label>
+    `;
+  }
+
+  _checkbox(key, label, options = {}) {
+    const checked = this._config?.[key] ?? options.defaultValue;
+    return `
+      <label class="check-row">
+        <input data-config-key="${this._escape(key)}" type="checkbox" ${checked ? "checked" : ""} />
+        <span>${this._escape(label)}</span>
+      </label>
+    `;
+  }
+
+  _select(key, label, options) {
+    const value = this._config?.[key] ?? options[0]?.[0] ?? "";
+    return `
+      <label>
+        <span>${this._escape(label)}</span>
+        <select data-config-key="${this._escape(key)}">
+          ${options.map(([optionValue, text]) => `<option value="${this._escape(optionValue)}" ${value === optionValue ? "selected" : ""}>${this._escape(text)}</option>`).join("")}
+        </select>
+      </label>
+    `;
+  }
+
+  _multiPicker(key, label, options, config = {}) {
+    const selected = new Set(Array.isArray(this._config?.[key]) ? this._config[key] : []);
+    const optionMap = new Map();
+    (options || []).forEach((option) => {
+      const [value, text] = Array.isArray(option) ? option : [option, option];
+      if (value) optionMap.set(String(value), String(text || value));
+    });
+    selected.forEach((value) => {
+      if (value && !optionMap.has(value)) optionMap.set(value, value);
+    });
+    const mergedOptions = [...optionMap.entries()].sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+    const labels = config.labelKey ? this._config?.[config.labelKey] || {} : {};
+    const choices = mergedOptions.length
+      ? mergedOptions
+          .map(
+            ([value, text]) => `
+              <div class="choice ${config.labelKey ? "with-alias" : ""}" data-picker-choice="${this._escape(key)}" data-search-text="${this._escape(`${value} ${text}`.toLowerCase())}">
+                <label>
+                  <input type="checkbox" data-config-multi="${this._escape(key)}" value="${this._escape(value)}" ${selected.has(value) ? "checked" : ""} />
+                  <span title="${this._escape(value)}">${this._escape(text)}</span>
+                </label>
+                ${
+                  config.labelKey
+                    ? `<input class="alias-input" data-config-label="${this._escape(config.labelKey)}" data-label-value="${this._escape(value)}" value="${this._escape(labels[value] || "")}" placeholder="${this._escape(config.placeholder || "Custom name")}" />`
+                    : ""
+                }
+              </div>
+            `
+          )
+          .join("")
+      : `<div class="empty-options">No options found yet</div>`;
+
+    return `
+      <div class="picker" data-picker="${this._escape(key)}">
+        <div class="picker-head">
+          <span>${this._escape(label)}</span>
+          <button type="button" data-clear-multi="${this._escape(key)}">All</button>
+        </div>
+        ${config.search ? `<input class="picker-search" data-picker-search="${this._escape(key)}" placeholder="${this._escape(config.searchPlaceholder || "Search...")}" />` : ""}
+        <div class="choice-grid">${choices}</div>
       </div>
     `;
+  }
+
+  _editorStyle() {
+    return `
+      <style>
+        .editor {
+          display: grid;
+          gap: 16px;
+          padding: 12px;
+          color: var(--primary-text-color);
+        }
+
+        fieldset {
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 8px;
+          display: grid;
+          gap: 12px;
+          margin: 0;
+          padding: 12px;
+        }
+
+        legend {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        label {
+          display: grid;
+          gap: 6px;
+        }
+
+        label span {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        input, select, textarea {
+          background: var(--card-background-color, #fff);
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 6px;
+          box-sizing: border-box;
+          color: var(--primary-text-color);
+          font: inherit;
+          min-height: 40px;
+          padding: 8px 10px;
+          width: 100%;
+        }
+
+        textarea {
+          font-family: var(--code-font-family, Consolas, Monaco, monospace);
+          min-height: 96px;
+          resize: vertical;
+        }
+
+        .check-row {
+          align-items: center;
+          display: flex;
+          gap: 10px;
+        }
+
+        .check-row input {
+          min-height: auto;
+          width: auto;
+        }
+
+        .picker {
+          display: grid;
+          gap: 8px;
+        }
+
+        .picker-head {
+          align-items: center;
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .picker-head span {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .picker-head button {
+          background: transparent;
+          border: 1px solid var(--divider-color, #d8dde6);
+          color: var(--primary-color, #03a9f4);
+          min-height: 30px;
+          padding: 4px 10px;
+        }
+
+        .choice-grid {
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 6px;
+          display: grid;
+          gap: 2px;
+          max-height: 190px;
+          overflow: auto;
+          padding: 6px;
+        }
+
+        .picker-search {
+          min-height: 36px;
+        }
+
+        .choice {
+          align-items: center;
+          border-radius: 4px;
+          display: grid;
+          gap: 8px;
+          grid-template-columns: 1fr;
+          min-height: 30px;
+          padding: 3px 6px;
+        }
+
+        .choice.with-alias {
+          grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+        }
+
+        .choice:hover {
+          background: var(--secondary-background-color, #f5f7fa);
+        }
+
+        .choice label {
+          align-items: center;
+          display: flex;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .choice input {
+          min-height: auto;
+          width: auto;
+        }
+
+        .choice .alias-input {
+          min-height: 32px;
+          width: 100%;
+        }
+
+        .choice span {
+          color: var(--primary-text-color);
+          font-size: 13px;
+          font-weight: 500;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .empty-options {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          padding: 8px;
+        }
+
+        .selected-list {
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 6px;
+          display: grid;
+          gap: 6px;
+          padding: 8px;
+        }
+
+        .selected-row {
+          align-items: center;
+          display: grid;
+          gap: 8px;
+          grid-template-columns: 1fr auto;
+        }
+
+        .selected-row span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .remove-chip {
+          background: transparent;
+          border: 1px solid var(--divider-color, #d8dde6);
+          color: var(--primary-text-color);
+          min-height: 30px;
+          padding: 4px 10px;
+        }
+
+        .modal-backdrop {
+          align-items: center;
+          background: rgba(0, 0, 0, 0.42);
+          display: flex;
+          inset: 0;
+          justify-content: center;
+          padding: 18px;
+          position: fixed;
+          z-index: 1000;
+        }
+
+        .modal {
+          background: var(--card-background-color, #fff);
+          border: 1px solid var(--divider-color, #d8dde6);
+          border-radius: 8px;
+          box-shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
+          display: grid;
+          gap: 12px;
+          max-height: min(720px, 86vh);
+          max-width: 720px;
+          padding: 14px;
+          width: min(720px, 100%);
+        }
+
+        .modal .choice-grid {
+          max-height: min(560px, 58vh);
+        }
+
+        .modal-head {
+          align-items: center;
+          display: flex;
+          gap: 10px;
+          justify-content: space-between;
+        }
+
+        .modal-head strong {
+          font-size: 16px;
+        }
+
+        button {
+          align-self: start;
+          background: var(--primary-color, #03a9f4);
+          border: 0;
+          border-radius: 6px;
+          color: var(--text-primary-color, #fff);
+          cursor: pointer;
+          font-weight: 700;
+          min-height: 38px;
+          padding: 8px 12px;
+        }
+
+        .error {
+          color: var(--error-color, #db4437);
+          font-size: 12px;
+          font-weight: 700;
+        }
+      </style>
+    `;
+  }
+
+  _wireBasicInputs(arrayKeys = []) {
+    this.shadowRoot.querySelectorAll("[data-config-key]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.configKey;
+        let value;
+        if (event.currentTarget.type === "checkbox") {
+          value = event.currentTarget.checked;
+        } else if (event.currentTarget.type === "number") {
+          value = Number(event.currentTarget.value);
+        } else if (arrayKeys.includes(key)) {
+          value = this._arrayFromText(event.currentTarget.value);
+        } else {
+          value = event.currentTarget.value;
+        }
+        this._emitConfig({ ...this._config, [key]: value });
+      });
+    });
+  }
+
+  _wireMultiPickers() {
+    this.shadowRoot.querySelectorAll("[data-config-multi]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.configMulti;
+        const values = [...this.shadowRoot.querySelectorAll(`[data-config-multi="${this._cssEscape(key)}"]:checked`)].map((input) => input.value);
+        this._emitConfig({ ...this._config, [key]: values });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-clear-multi]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        const key = event.currentTarget.dataset.clearMulti;
+        this.shadowRoot.querySelectorAll(`[data-config-multi="${this._cssEscape(key)}"]`).forEach((input) => {
+          input.checked = false;
+        });
+        this._emitConfig({ ...this._config, [key]: [] });
+      });
+    });
+  }
+
+  _wirePickerSearch() {
+    this.shadowRoot.querySelectorAll("[data-picker-search]").forEach((element) => {
+      element.addEventListener("input", (event) => {
+        const key = event.currentTarget.dataset.pickerSearch;
+        const query = event.currentTarget.value.trim().toLowerCase();
+        this.shadowRoot.querySelectorAll(`[data-picker-choice="${this._cssEscape(key)}"]`).forEach((choice) => {
+          choice.style.display = query && !String(choice.dataset.searchText || "").includes(query) ? "none" : "";
+        });
+      });
+    });
+  }
+
+  _wireLabelInputs() {
+    this.shadowRoot.querySelectorAll("[data-config-label]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.configLabel;
+        const valueKey = event.currentTarget.dataset.labelValue;
+        const label = event.currentTarget.value.trim();
+        const labels = { ...(this._config?.[key] || {}) };
+        if (label) {
+          labels[valueKey] = label;
+        } else {
+          delete labels[valueKey];
+        }
+        this._emitConfig({ ...this._config, [key]: labels });
+      });
+    });
+  }
+
+  _cssEscape(value) {
+    if (window.CSS?.escape) return window.CSS.escape(value);
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  _emitConfig(config) {
+    this._config = config;
+    this._skipNextSetConfigRender = true;
+    window.setTimeout(() => {
+      this._skipNextSetConfigRender = false;
+    }, 500);
+    this.dispatchEvent(
+      new CustomEvent("config-changed", {
+        bubbles: true,
+        composed: true,
+        detail: { config },
+      })
+    );
+  }
+}
+
+class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
+  constructor() {
+    super();
+    this._entities = [];
+    this._areas = [];
+    this._registriesLoaded = false;
+    this._optionsSignature = "";
+    this._excludedPickerOpen = false;
+  }
+
+  setConfig(config) {
+    const nextConfig = {
+      title: "Offline Devices",
+      show_online: true,
+      display_mode: "detailed",
+      offline_states: ["unavailable", "unknown"],
+      columns: "auto",
+      domains: [],
+      integrations: [],
+      areas: [],
+      excluded_entities: [],
+      domain_labels: {},
+      integration_labels: {},
+      force_simple: false,
+      persist_filters: true,
+      ...config,
+    };
+    this._config = nextConfig;
+    if (this._skipNextSetConfigRender) {
+      this._skipNextSetConfigRender = false;
+      return;
+    }
+    this._renderEditor();
+  }
+
+  _handleHassChanged(hass) {
+    this._loadEditorRegistries(hass);
+    this._renderEditorIfOptionsChanged();
+  }
+
+  async _loadEditorRegistries(hass) {
+    if (this._registriesLoaded || !hass?.callWS) return;
+    this._registriesLoaded = true;
+    try {
+      const [entities, areas] = await Promise.all([
+        hass.callWS({ type: "config/entity_registry/list" }),
+        hass.callWS({ type: "config/area_registry/list" }),
+      ]);
+      this._entities = entities || [];
+      this._areas = areas || [];
+      this._renderEditorIfOptionsChanged();
+    } catch (error) {
+      console.warn("offline-device-panel-editor: registry lookup failed", error);
+    }
+  }
+
+  _renderEditor() {
+    if (!this._config) return;
+    this._optionsSignature = this._currentOptionsSignature();
+    this.shadowRoot.innerHTML = `
+      ${this._editorStyle()}
+      <div class="editor">
+        <fieldset>
+          <legend>General</legend>
+          ${this._field("title", "Title")}
+          ${this._select("display_mode", "Card style", [
+            ["detailed", "Detailed"],
+            ["simple", "Simple"],
+          ])}
+          ${this._checkbox("show_online", "Allow online devices", { defaultValue: true })}
+          ${this._checkbox("force_simple", "Force simple mode", { defaultValue: false })}
+          ${this._checkbox("persist_filters", "Remember filters in this browser", { defaultValue: true })}
+          ${this._field("columns", "Columns")}
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          ${this._textarea("offline_states", "Offline states", { rows: 3 })}
+          ${this._multiPicker("domains", "Domains to include", this._domainOptions(), { labelKey: "domain_labels", placeholder: "Custom domain name" })}
+          ${this._multiPicker("integrations", "Integrations to include", this._integrationOptions(), { labelKey: "integration_labels", placeholder: "Custom integration name" })}
+          ${this._multiPicker("areas", "Areas to include", this._areaOptions())}
+        </fieldset>
+        <fieldset>
+          <legend>Excluded Entities</legend>
+          ${this._excludedEntitiesTemplate()}
+        </fieldset>
+        ${this._excludedPickerOpen ? this._excludedEntityModal() : ""}
+      </div>
+    `;
+    this._wireBasicInputs(["offline_states"]);
+    this._wireMultiPickers();
+    this._wirePickerSearch();
+    this._wireLabelInputs();
+    this._wireExcludedEntityPicker();
+  }
+
+  _renderEditorIfOptionsChanged() {
+    if (!this._config) return;
+    const signature = this._currentOptionsSignature();
+    if (signature === this._optionsSignature) return;
+    this._renderEditor();
+  }
+
+  _currentOptionsSignature() {
+    return JSON.stringify({
+      domains: this._domainOptions(),
+      integrations: this._integrationOptions(),
+      areas: this._areaOptions(),
+      entities: this._entityOptions(),
+    });
+  }
+
+  _domainOptions() {
+    const states = this._hass?.states || {};
+    return [...new Set(Object.keys(states).map((entityId) => entityId.split(".")[0]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  }
+
+  _integrationOptions() {
+    const states = this._hass?.states || {};
+    const fromRegistry = this._entities.map((entity) => entity.platform).filter(Boolean);
+    const fromStates = Object.values(states)
+      .flatMap((stateObj) => [stateObj.attributes?.integration, stateObj.attributes?.platform])
+      .filter(Boolean);
+    return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _areaOptions() {
+    const states = this._hass?.states || {};
+    const fromRegistry = this._areas.map((area) => area.name || area.area_id || area.id).filter(Boolean);
+    const fromStates = Object.values(states)
+      .flatMap((stateObj) => [stateObj.attributes?.area, stateObj.attributes?.area_id])
+      .filter(Boolean);
+    return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _entityOptions() {
+    const states = this._hass?.states || {};
+    const registryNames = new Map(this._entities.map((entity) => [entity.entity_id, entity.name || entity.original_name || ""]));
+    return Object.entries(states)
+      .map(([entityId, stateObj]) => {
+        const name = stateObj.attributes?.friendly_name || registryNames.get(entityId) || entityId;
+        return [entityId, `${name} (${entityId})`];
+      })
+      .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+  }
+
+  _excludedEntitiesTemplate() {
+    const selected = Array.isArray(this._config.excluded_entities) ? this._config.excluded_entities : [];
+    const labels = new Map(this._entityOptions());
+    const rows = selected.length
+      ? selected
+          .map(
+            (entityId) => `
+              <div class="selected-row">
+                <span title="${this._escape(entityId)}">${this._escape(labels.get(entityId) || entityId)}</span>
+                <button type="button" class="remove-chip" data-remove-excluded="${this._escape(entityId)}">Remove</button>
+              </div>
+            `
+          )
+          .join("")
+      : `<div class="empty-options">No excluded entities selected</div>`;
+
+    return `
+      <div class="selected-list">${rows}</div>
+      <button type="button" data-open-excluded-picker>Add entities</button>
+    `;
+  }
+
+  _excludedEntityModal() {
+    return `
+      <div class="modal-backdrop" data-close-excluded-picker>
+        <div class="modal" role="dialog" aria-modal="true" aria-label="Add excluded entities" data-excluded-modal>
+          <div class="modal-head">
+            <strong>Add excluded entities</strong>
+            <button type="button" data-close-excluded-picker>Done</button>
+          </div>
+          ${this._multiPicker("excluded_entities", "Entities", this._entityOptions(), { search: true, searchPlaceholder: "Search entities..." })}
+        </div>
+      </div>
+    `;
+  }
+
+  _wireExcludedEntityPicker() {
+    this.shadowRoot.querySelectorAll("[data-open-excluded-picker]").forEach((element) => {
+      element.addEventListener("click", () => {
+        this._excludedPickerOpen = true;
+        this._renderEditor();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-close-excluded-picker]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        if (event.target.closest?.("[data-excluded-modal]") && !event.target.matches("[data-close-excluded-picker]")) return;
+        this._excludedPickerOpen = false;
+        this._renderEditor();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-remove-excluded]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        const entityId = event.currentTarget.dataset.removeExcluded;
+        const excluded = (this._config.excluded_entities || []).filter((value) => value !== entityId);
+        this._emitConfig({ ...this._config, excluded_entities: excluded });
+        this._renderEditor();
+      });
+    });
   }
 }
 
@@ -1270,13 +2013,23 @@ class DeviceMapPanel extends HTMLElement {
       markerSize: 18,
       showLabels: true,
       nudgeStep: 1,
+      mapViewports: {},
     };
     this._mapScroll = {
       left: 0,
       top: 0,
       leftRatio: 0,
       topRatio: 0,
+      centerX: 0.5,
+      centerY: 0.5,
+      zoom: 1,
     };
+    this._mapScrollByFloor = {};
+    this._mapViewportVersion = 0;
+    this._isRestoringMapScroll = false;
+    this._viewportSaveTimer = null;
+    this._hasRenderedWithHass = false;
+    this._registryRenderComplete = false;
     this._mapAlertScrollLeft = 0;
     this._deviceListScrollTop = 0;
     this._isPanning = false;
@@ -1294,23 +2047,24 @@ class DeviceMapPanel extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = {
+    const nextConfig = {
       title: "Device Map",
-      image: "",
       offline_states: ["unavailable", "unknown"],
       domains: [],
       integrations: [],
       areas: [],
+      domain_labels: {},
+      integration_labels: {},
       markers: [],
       floors: [],
       persist_layout: true,
-      storage_key: "",
       marker_size: 18,
       show_labels: true,
       show_entity_state: false,
       nudge_step: 1,
       ...config,
     };
+    this._config = nextConfig;
     this._floors = this._normalizedFloors(this._config);
     if (!this._floors.some((floor) => floor.id === this._activeFloorId)) {
       this._activeFloorId = this._floors[0]?.id || "default";
@@ -1321,8 +2075,11 @@ class DeviceMapPanel extends HTMLElement {
       nudgeStep: this._config.nudge_step,
       ...this._loadDisplay(),
     });
+    this._applyStoredViewportForFloor(this._activeFloorId);
     this._floorMarkers = this._mergedFloorMarkers(this._configFloorMarkers(), this._loadMarkers());
     this._markers = this._floorMarkers[this._activeFloorId] || {};
+    this._hasRenderedWithHass = false;
+    this._registryRenderComplete = false;
     this._render();
   }
 
@@ -1330,7 +2087,13 @@ class DeviceMapPanel extends HTMLElement {
     this._hass = hass;
     this._loadRegistries(hass);
     if (this._isControlActive()) return;
-    this._render();
+    if (!this._hasRenderedWithHass || (this._registriesLoaded && !this._registryRenderComplete)) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
+      this._hasRenderedWithHass = true;
+      if (this._registriesLoaded) this._registryRenderComplete = true;
+      return;
+    }
+    this._updateLiveMapState();
   }
 
   getCardSize() {
@@ -1390,7 +2153,9 @@ class DeviceMapPanel extends HTMLElement {
       this._devices = devices || [];
       this._areas = areas || [];
       if (this._isControlActive()) return;
-      this._render();
+      this._render({ preserveMapViewport: true });
+      this._hasRenderedWithHass = true;
+      this._registryRenderComplete = true;
     } catch (error) {
       console.warn("device-map-panel: registry lookup failed", error);
     }
@@ -1432,6 +2197,8 @@ class DeviceMapPanel extends HTMLElement {
         offline: isOffline,
         domain,
         integration,
+        displayDomain: this._domainLabel(domain),
+        displayIntegration: this._integrationLabel(integration),
         state: stateObj.state,
         domains: [domain],
         integrations: [integration],
@@ -1456,6 +2223,14 @@ class DeviceMapPanel extends HTMLElement {
     if (entity?.platform) return entity.platform;
     const attr = stateObj.attributes || {};
     return attr.integration || attr.platform || "unknown";
+  }
+
+  _domainLabel(domain) {
+    return this._config.domain_labels?.[domain] || domain;
+  }
+
+  _integrationLabel(integration) {
+    return this._config.integration_labels?.[integration] || integration;
   }
 
   _isOffline(state) {
@@ -1573,7 +2348,7 @@ class DeviceMapPanel extends HTMLElement {
       if (this._filters.area !== "all" && row.areaName !== this._filters.area) return false;
       if (!search) return true;
 
-      const haystack = `${row.name} ${row.entityId} ${row.areaName} ${row.domain} ${row.integration}`.toLowerCase();
+      const haystack = `${row.name} ${row.entityId} ${row.areaName} ${row.domain} ${row.integration} ${row.displayDomain} ${row.displayIntegration}`.toLowerCase();
       return haystack.includes(search);
     });
   }
@@ -1625,6 +2400,55 @@ class DeviceMapPanel extends HTMLElement {
       return Array.isArray(value) ? value : [value];
     });
     return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  }
+
+  _labeledOptions(rows, key) {
+    return this._options(rows, key)
+      .map((value) => [value, key === "domains" ? this._domainLabel(value) : key === "integrations" ? this._integrationLabel(value) : value])
+      .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+  }
+
+  _scrollSnapshots() {
+    const snapshots = [];
+    const seen = new Set();
+    const add = (element) => {
+      if (!element || seen.has(element)) return;
+      seen.add(element);
+      snapshots.push({
+        element,
+        left: element.scrollLeft,
+        top: element.scrollTop,
+      });
+    };
+
+    add(document.scrollingElement || document.documentElement);
+
+    let node = this;
+    while (node) {
+      if (node instanceof Element) {
+        const style = getComputedStyle(node);
+        const canScrollY = /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight;
+        const canScrollX = /(auto|scroll|overlay)/.test(style.overflowX) && node.scrollWidth > node.clientWidth;
+        if (canScrollY || canScrollX) add(node);
+      }
+
+      const root = node.getRootNode?.();
+      node = node.parentElement || root?.host || null;
+    }
+
+    return snapshots;
+  }
+
+  _restoreScroll(snapshots) {
+    for (const snapshot of snapshots) {
+      snapshot.element.scrollTo(snapshot.left, snapshot.top);
+    }
+  }
+
+  _restoreScrollSoon(snapshots) {
+    this._restoreScroll(snapshots);
+    requestAnimationFrame(() => this._restoreScroll(snapshots));
+    window.setTimeout(() => this._restoreScroll(snapshots), 80);
   }
 
   _configMarkers() {
@@ -1799,13 +2623,74 @@ class DeviceMapPanel extends HTMLElement {
       markerSize: Number.isFinite(markerSize) ? Math.max(12, Math.min(48, markerSize)) : 18,
       nudgeStep: Number.isFinite(nudgeStep) ? Math.max(0.05, Math.min(10, nudgeStep)) : 1,
       showLabels: display.showLabels !== false && display.showLabels !== "false",
+      mapViewports: display.mapViewports && typeof display.mapViewports === "object" && !Array.isArray(display.mapViewports) ? display.mapViewports : {},
     };
   }
 
-  _render() {
+  _storedViewportForFloor(floorId = this._activeFloorId || "default") {
+    const viewport = this._display.mapViewports?.[floorId];
+    if (!viewport || typeof viewport !== "object") return null;
+    const zoom = Number(viewport.zoom);
+    const centerX = Number(viewport.centerX);
+    const centerY = Number(viewport.centerY);
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return null;
+    return {
+      centerX: Math.max(0, Math.min(1, centerX)),
+      centerY: Math.max(0, Math.min(1, centerY)),
+      zoom: Number.isFinite(zoom) ? Math.max(0.5, Math.min(4, zoom)) : this._zoom,
+    };
+  }
+
+  _applyStoredViewportForFloor(floorId = this._activeFloorId || "default") {
+    const viewport = this._storedViewportForFloor(floorId);
+    if (!viewport) return;
+    this._zoom = viewport.zoom;
+    this._mapScroll = {
+      left: 0,
+      top: 0,
+      leftRatio: 0,
+      topRatio: 0,
+      centerX: viewport.centerX,
+      centerY: viewport.centerY,
+      zoom: viewport.zoom,
+    };
+    this._mapScrollByFloor[floorId] = { ...this._mapScroll };
+  }
+
+  _rememberMapViewport({ save = false } = {}) {
+    const floorId = this._activeFloorId || "default";
+    const centerX = Number.isFinite(this._mapScroll.centerX) ? Math.max(0, Math.min(1, this._mapScroll.centerX)) : 0.5;
+    const centerY = Number.isFinite(this._mapScroll.centerY) ? Math.max(0, Math.min(1, this._mapScroll.centerY)) : 0.5;
+    this._display.mapViewports = {
+      ...(this._display.mapViewports || {}),
+      [floorId]: {
+        centerX,
+        centerY,
+        zoom: this._zoom,
+      },
+    };
+    if (save) this._saveDisplay();
+    else this._scheduleViewportSave();
+  }
+
+  _scheduleViewportSave() {
+    if (this._config.persist_layout === false) return;
+    if (this._viewportSaveTimer) window.clearTimeout(this._viewportSaveTimer);
+    this._viewportSaveTimer = window.setTimeout(() => {
+      this._viewportSaveTimer = null;
+      this._saveDisplay();
+    }, 250);
+  }
+
+  _render(options = {}) {
     if (!this.shadowRoot) return;
 
-    this._captureMapScroll();
+    const pageScrollSnapshots = options.preservePageScroll ? this._scrollSnapshots() : [];
+    if (options.preserveMapViewport) {
+      this._applyStoredViewportForFloor(this._activeFloorId);
+    } else {
+      this._captureMapScroll();
+    }
     this._captureMapAlertScroll();
     this._captureDeviceListScroll();
     const activeElement = this.shadowRoot.activeElement;
@@ -1835,7 +2720,7 @@ class DeviceMapPanel extends HTMLElement {
             isEditing && !this._sidebarCollapsed
               ? `
           <aside>
-            <div class="sidebar-status">${this._escape(modeLabel)} - ${placedRows.length} placed / ${offlineCount} offline</div>
+            <div class="sidebar-status">${this._escape(modeLabel)} - v${this._escape(VERSION)} - ${placedRows.length} placed / ${offlineCount} offline</div>
             <section class="filters">
               ${this._select("placementStatus", "Placement", [
                 ["all", "All placements"],
@@ -1847,8 +2732,8 @@ class DeviceMapPanel extends HTMLElement {
                 ["offline", "Offline"],
                 ["online", "Online"],
               ])}
-              ${this._select("domain", "Type", [["all", "All types"], ...this._options(rows, "domains").map((value) => [value, value])])}
-              ${this._select("integration", "Integration", [["all", "All integrations"], ...this._options(rows, "integrations").map((value) => [value, value])])}
+              ${this._select("domain", "Domain", [["all", "All domains"], ...this._labeledOptions(rows, "domains")])}
+              ${this._select("integration", "Integration", [["all", "All integrations"], ...this._labeledOptions(rows, "integrations")])}
               ${this._select("area", "Area", [["all", "All areas"], ...this._options(rows, "areaName").map((value) => [value, value])])}
               <label>
                 <span>Search</span>
@@ -1983,6 +2868,7 @@ class DeviceMapPanel extends HTMLElement {
 
     this._attachEvents();
     requestAnimationFrame(() => {
+      if (options.preservePageScroll) this._restoreScrollSoon(pageScrollSnapshots);
       if (this._pendingMarkerFocus) {
         this._focusMarker(this._pendingMarkerFocus);
         this._pendingMarkerFocus = null;
@@ -2024,12 +2910,15 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("change", (event) => {
         const floorId = event.currentTarget.value;
         if (!this._floors.some((floor) => floor.id === floorId)) return;
+        this._captureMapScroll();
+        this._mapScrollByFloor[this._activeFloorId] = { ...this._mapScroll };
         this._floorMarkers[this._activeFloorId] = this._markers;
         this._activeFloorId = floorId;
         this._markers = this._floorMarkers[floorId] || {};
         this._selectedMarkers.clear();
         this._selectionBox = null;
-        this._mapScroll = { left: 0, top: 0, leftRatio: 0, topRatio: 0 };
+        this._applyStoredViewportForFloor(floorId);
+        this._mapScroll = this._mapScrollByFloor[floorId] || { left: 0, top: 0, leftRatio: 0, topRatio: 0, centerX: 0.5, centerY: 0.5, zoom: this._zoom };
         this._render();
       });
     });
@@ -2053,6 +2942,7 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("click", (event) => {
         const action = event.currentTarget.dataset.zoom;
         if (action === "reset") this._zoom = 1;
+        this._mapViewportVersion += 1;
         this._applyZoomToDom();
       });
     });
@@ -2061,6 +2951,7 @@ class DeviceMapPanel extends HTMLElement {
       element.addEventListener("input", (event) => {
         const value = Number(event.currentTarget.value);
         this._zoom = Math.max(0.5, Math.min(4, value / 100));
+        this._mapViewportVersion += 1;
         this._applyZoomToDom();
       });
     });
@@ -2089,6 +2980,7 @@ class DeviceMapPanel extends HTMLElement {
     const map = this.shadowRoot.querySelector("[data-map]");
     if (map) {
       map.addEventListener("scroll", () => {
+        if (!this._isRestoringMapScroll) this._mapViewportVersion += 1;
         this._captureMapScroll();
         this._positionNudgePad();
       });
@@ -2367,12 +3259,19 @@ class DeviceMapPanel extends HTMLElement {
     if (!map) return;
     const maxLeft = Math.max(0, map.scrollWidth - map.clientWidth);
     const maxTop = Math.max(0, map.scrollHeight - map.clientHeight);
+    const centerX = map.scrollWidth ? (map.scrollLeft + map.clientWidth / 2) / map.scrollWidth : 0.5;
+    const centerY = map.scrollHeight ? (map.scrollTop + map.clientHeight / 2) / map.scrollHeight : 0.5;
     this._mapScroll = {
       left: map.scrollLeft,
       top: map.scrollTop,
       leftRatio: maxLeft ? map.scrollLeft / maxLeft : 0,
       topRatio: maxTop ? map.scrollTop / maxTop : 0,
+      centerX,
+      centerY,
+      zoom: this._zoom,
     };
+    this._mapScrollByFloor[this._activeFloorId || "default"] = { ...this._mapScroll };
+    this._rememberMapViewport();
   }
 
   _restoreMapScroll() {
@@ -2380,19 +3279,30 @@ class DeviceMapPanel extends HTMLElement {
     if (!map) return;
     const maxLeft = Math.max(0, map.scrollWidth - map.clientWidth);
     const maxTop = Math.max(0, map.scrollHeight - map.clientHeight);
-    const left = this._mapScroll.left <= maxLeft ? this._mapScroll.left : maxLeft * (this._mapScroll.leftRatio || 0);
-    const top = this._mapScroll.top <= maxTop ? this._mapScroll.top : maxTop * (this._mapScroll.topRatio || 0);
+    const hasCenter = Number.isFinite(this._mapScroll.centerX) && Number.isFinite(this._mapScroll.centerY);
+    const left = hasCenter ? this._mapScroll.centerX * map.scrollWidth - map.clientWidth / 2 : this._mapScroll.left <= maxLeft ? this._mapScroll.left : maxLeft * (this._mapScroll.leftRatio || 0);
+    const top = hasCenter ? this._mapScroll.centerY * map.scrollHeight - map.clientHeight / 2 : this._mapScroll.top <= maxTop ? this._mapScroll.top : maxTop * (this._mapScroll.topRatio || 0);
+    this._isRestoringMapScroll = true;
     map.scrollLeft = Math.max(0, Math.min(maxLeft, left));
     map.scrollTop = Math.max(0, Math.min(maxTop, top));
+    window.setTimeout(() => {
+      this._isRestoringMapScroll = false;
+    }, 0);
     this._positionNudgePad();
   }
 
   _restoreMapScrollSoon() {
     if (Date.now() < this._suppressMapRestoreUntil) return;
-    this._restoreMapScroll();
-    requestAnimationFrame(() => this._restoreMapScroll());
-    window.setTimeout(() => this._restoreMapScroll(), 80);
-    window.setTimeout(() => this._restoreMapScroll(), 250);
+    const restoreVersion = this._mapViewportVersion;
+    const restoreIfCurrent = () => {
+      if (restoreVersion !== this._mapViewportVersion) return;
+      this._restoreMapScroll();
+    };
+    restoreIfCurrent();
+    requestAnimationFrame(restoreIfCurrent);
+    window.setTimeout(restoreIfCurrent, 80);
+    window.setTimeout(restoreIfCurrent, 250);
+    window.setTimeout(restoreIfCurrent, 750);
   }
 
   _captureMapAlertScroll() {
@@ -2507,6 +3417,7 @@ class DeviceMapPanel extends HTMLElement {
       if (Math.hypot(event.clientX - startX, event.clientY - startY) > 4) moved = true;
       map.scrollLeft = startLeft - (event.clientX - startX);
       map.scrollTop = startTop - (event.clientY - startY);
+      this._mapViewportVersion += 1;
       this._captureMapScroll();
     };
 
@@ -2549,6 +3460,7 @@ class DeviceMapPanel extends HTMLElement {
       emptyPointerActive = false;
       this._isPanning = false;
       this._captureMapScroll();
+      this._rememberMapViewport({ save: true });
       map.classList.remove("panning");
       try {
         map.releasePointerCapture?.(event.pointerId);
@@ -2730,6 +3642,48 @@ class DeviceMapPanel extends HTMLElement {
     `;
   }
 
+  _updateLiveMapState() {
+    if (!this.shadowRoot?.querySelector("[data-map]")) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
+      return;
+    }
+
+    const rows = this._deviceRows();
+    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const isEditing = this._canEdit() && this._mode === "edit";
+    let offlineCount = 0;
+    let placedCount = 0;
+
+    for (const [key] of Object.entries(this._markers || {})) {
+      const row = rowByKey.get(key);
+      if (!row) continue;
+      placedCount += 1;
+      if (row.offline) offlineCount += 1;
+      const marker = this.shadowRoot.querySelector(`[data-marker="${this._cssEscape(key)}"]`);
+      if (!marker) continue;
+      const stateClass = this._stateClass(row);
+      marker.classList.toggle("offline", row.offline);
+      marker.classList.toggle("online", !row.offline);
+      marker.classList.toggle("state-active", stateClass === "state-active");
+      marker.classList.toggle("state-inactive", stateClass === "state-inactive");
+      marker.classList.toggle("state-neutral", stateClass === "state-neutral");
+      marker.classList.toggle("selected", isEditing && this._selectedMarkers.has(key));
+      marker.title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+      marker.dataset.entity = row.entityId;
+      const icon = marker.querySelector("ha-icon");
+      icon?.setAttribute("icon", this._markerIcon(row));
+      const label = marker.querySelector("strong");
+      if (label) label.textContent = row.name;
+    }
+
+    const sidebarStatus = this.shadowRoot.querySelector(".sidebar-status");
+    if (sidebarStatus) {
+      sidebarStatus.textContent = `${isEditing ? "Edit Mode" : "User Mode"} - v${VERSION} - ${placedCount} placed / ${offlineCount} offline`;
+    }
+
+    this._captureMapScroll();
+  }
+
   _jumpToMarker(floorId, markerKey) {
     if (!floorId || !markerKey || !this._floors.some((floor) => floor.id === floorId)) return;
     if (floorId === this._activeFloorId) {
@@ -2765,6 +3719,7 @@ class DeviceMapPanel extends HTMLElement {
       map.scrollLeft = Math.max(0, Math.min(maxLeft, targetLeft));
       map.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
       this._captureMapScroll();
+      this._rememberMapViewport({ save: true });
     }
     if (slider) slider.value = String(zoomPercent);
     if (output) output.textContent = `${zoomPercent}%`;
@@ -2824,7 +3779,7 @@ class DeviceMapPanel extends HTMLElement {
         <span class="dot"><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
         <span class="device-text">
           <strong>${this._escape(row.name)}</strong>
-          <small>${this._escape(row.areaName)} - ${this._escape(row.deviceName || row.domain || row.integration)}</small>
+          <small>${this._escape(row.areaName)} - ${this._escape(row.deviceName || row.displayDomain || row.displayIntegration)}</small>
         </span>
         ${
           placed
@@ -2943,7 +3898,8 @@ class DeviceMapPanel extends HTMLElement {
   }
 
   _cssEscape(value) {
-    return window.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/"/g, '\\"');
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   _styles() {
@@ -4023,14 +4979,326 @@ class DeviceMapPanel extends HTMLElement {
 
 customElements.define("device-map-panel", DeviceMapPanel);
 
-class DeviceMapPanelEditor extends HTMLElement {
+class DeviceMapPanelEditor extends DevicePanelConfigEditor {
+  constructor() {
+    super();
+    this._entities = [];
+    this._areas = [];
+    this._registriesLoaded = false;
+    this._optionsSignature = "";
+  }
+
   setConfig(config) {
-    this._config = config;
-    this.innerHTML = `
-      <div style="padding: 12px; color: var(--primary-text-color);">
-        Configure this card in YAML with an image or floors, then drag devices from the sidebar onto the drawing.
+    const nextConfig = {
+      title: "Device Map",
+      image: "",
+      offline_states: ["unavailable", "unknown"],
+      domains: [],
+      integrations: [],
+      areas: [],
+      domain_labels: {},
+      integration_labels: {},
+      markers: [],
+      floors: [],
+      persist_layout: true,
+      storage_key: "",
+      marker_size: 18,
+      show_labels: true,
+      show_entity_state: false,
+      nudge_step: 1,
+      ...config,
+    };
+    this._config = nextConfig;
+    if (this._skipNextSetConfigRender) {
+      this._skipNextSetConfigRender = false;
+      return;
+    }
+    this._layoutError = "";
+    this._renderEditor();
+  }
+
+  _handleHassChanged(hass) {
+    this._loadEditorRegistries(hass);
+    this._renderEditorIfOptionsChanged();
+  }
+
+  async _loadEditorRegistries(hass) {
+    if (this._registriesLoaded || !hass?.callWS) return;
+    this._registriesLoaded = true;
+    try {
+      const [entities, areas] = await Promise.all([
+        hass.callWS({ type: "config/entity_registry/list" }),
+        hass.callWS({ type: "config/area_registry/list" }),
+      ]);
+      this._entities = entities || [];
+      this._areas = areas || [];
+      this._renderEditorIfOptionsChanged();
+    } catch (error) {
+      console.warn("device-map-panel-editor: registry lookup failed", error);
+    }
+  }
+
+  _renderEditor() {
+    if (!this._config) return;
+    this._optionsSignature = this._currentOptionsSignature();
+    this.shadowRoot.innerHTML = `
+      ${this._editorStyle()}
+      <div class="editor">
+        <fieldset>
+          <legend>General</legend>
+          ${this._field("title", "Title")}
+          ${this._checkbox("persist_layout", "Remember marker layout in this browser", { defaultValue: true })}
+        </fieldset>
+        <fieldset>
+          <legend>Display</legend>
+          ${this._field("marker_size", "Marker size", { type: "number", min: 12, max: 48, step: 1 })}
+          ${this._field("nudge_step", "Nudge step", { type: "number", min: 0.05, max: 10, step: 0.05 })}
+          ${this._checkbox("show_labels", "Show marker names", { defaultValue: true })}
+          ${this._checkbox("show_entity_state", "Show entity state styling", { defaultValue: false })}
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          ${this._textarea("offline_states", "Offline states", { rows: 3 })}
+          ${this._multiPicker("domains", "Domains to include", this._domainOptions(), { labelKey: "domain_labels", placeholder: "Custom domain name" })}
+          ${this._multiPicker("integrations", "Integrations to include", this._integrationOptions(), { labelKey: "integration_labels", placeholder: "Custom integration name" })}
+          ${this._multiPicker("areas", "Areas to include", this._areaOptions())}
+        </fieldset>
+        <fieldset>
+          <legend>Floors and Markers</legend>
+          <label>
+            <span>Floors and markers</span>
+            <textarea data-layout-yaml rows="12">${this._escape(this._layoutYamlFromConfig(this._config))}</textarea>
+          </label>
+          <button type="button" data-apply-layout>Apply floors and markers</button>
+          <div class="error" data-layout-error></div>
+        </fieldset>
       </div>
     `;
+    this._wireBasicInputs(["offline_states"]);
+    this.shadowRoot.querySelector("[data-apply-layout]")?.addEventListener("click", () => this._applyLayoutYaml());
+    this._wireMultiPickers();
+    this._wireLabelInputs();
+  }
+
+  _renderEditorIfOptionsChanged() {
+    if (!this._config) return;
+    const signature = this._currentOptionsSignature();
+    if (signature === this._optionsSignature) return;
+    this._renderEditor();
+  }
+
+  _currentOptionsSignature() {
+    return JSON.stringify({
+      domains: this._domainOptions(),
+      integrations: this._integrationOptions(),
+      areas: this._areaOptions(),
+    });
+  }
+
+  _domainOptions() {
+    const states = this._hass?.states || {};
+    return [...new Set(Object.keys(states).map((entityId) => entityId.split(".")[0]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  }
+
+  _integrationOptions() {
+    const states = this._hass?.states || {};
+    const fromRegistry = this._entities.map((entity) => entity.platform).filter(Boolean);
+    const fromStates = Object.values(states)
+      .flatMap((stateObj) => [stateObj.attributes?.integration, stateObj.attributes?.platform])
+      .filter(Boolean);
+    return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _areaOptions() {
+    const states = this._hass?.states || {};
+    const fromRegistry = this._areas.map((area) => area.name || area.area_id || area.id).filter(Boolean);
+    const fromStates = Object.values(states)
+      .flatMap((stateObj) => [stateObj.attributes?.area, stateObj.attributes?.area_id])
+      .filter(Boolean);
+    return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _layoutYamlFromConfig(config) {
+    if (Array.isArray(config.floors) && config.floors.length) {
+      return [
+        "floors:",
+        ...config.floors.flatMap((floor) => [
+          `  - id: ${this._yamlScalar(floor.id || "")}`,
+          `    name: ${this._yamlScalar(floor.name || floor.title || "")}`,
+          `    image: ${this._yamlScalar(floor.image || "")}`,
+          ...(Array.isArray(floor.markers) && floor.markers.length
+            ? [
+                "    markers:",
+                ...floor.markers.flatMap((marker) => this._markerYaml(marker, 6)),
+              ]
+            : ["    markers: []"]),
+        ]),
+      ].join("\n");
+    }
+
+    if (config.image || (Array.isArray(config.markers) && config.markers.length)) {
+      return [
+        "floors:",
+        "  - id: default",
+        `    name: ${this._yamlScalar(config.title || "Floor")}`,
+        `    image: ${this._yamlScalar(config.image || "")}`,
+        ...(Array.isArray(config.markers) && config.markers.length
+          ? [
+              "    markers:",
+              ...config.markers.flatMap((marker) => this._markerYaml(marker, 6)),
+            ]
+          : ["    markers: []"]),
+      ].join("\n");
+    }
+
+    return ["floors:", "  - id: default", `    name: ${this._yamlScalar(config.title || "Floor")}`, '    image: ""', "    markers: []"].join("\n");
+  }
+
+  _markerYaml(marker, indent) {
+    const space = " ".repeat(indent);
+    const child = " ".repeat(indent + 2);
+    return [
+      `${space}- key: ${this._yamlScalar(marker.key || marker.entity || marker.device || "")}`,
+      `${child}entity: ${this._yamlScalar(marker.entity || marker.entityId || marker.key || "")}`,
+      ...(marker.name ? [`${child}name: ${this._yamlScalar(marker.name)}`] : []),
+      ...(marker.icon ? [`${child}icon: ${this._yamlScalar(marker.icon)}`] : []),
+      `${child}x: ${Number(marker.x || 0).toFixed(2)}`,
+      `${child}y: ${Number(marker.y || 0).toFixed(2)}`,
+    ];
+  }
+
+  _yamlScalar(value) {
+    const text = String(value ?? "");
+    if (!text) return '""';
+    if (/^[A-Za-z0-9_.:/@+-]+$/.test(text)) return text;
+    return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+
+  _applyLayoutYaml() {
+    const textarea = this.shadowRoot.querySelector("[data-layout-yaml]");
+    const error = this.shadowRoot.querySelector("[data-layout-error]");
+    try {
+      const layout = this._parseLayoutYaml(textarea?.value || "");
+      const nextConfig = { ...this._config };
+      if (layout.floors) {
+        nextConfig.floors = layout.floors;
+        delete nextConfig.markers;
+        delete nextConfig.image;
+      } else {
+        nextConfig.markers = layout.markers || [];
+        delete nextConfig.floors;
+      }
+      if (error) error.textContent = "";
+      this._emitConfig(nextConfig);
+    } catch (parseError) {
+      if (error) error.textContent = parseError.message || "Floors and markers YAML could not be parsed.";
+    }
+  }
+
+  _parseLayoutYaml(text) {
+    const value = String(text || "").trim();
+    if (!value) return { markers: [] };
+
+    if (window.jsyaml?.load) {
+      const parsed = window.jsyaml.load(value) || {};
+      if (Array.isArray(parsed.floors)) return { floors: parsed.floors };
+      if (Array.isArray(parsed.markers)) return { markers: parsed.markers };
+      throw new Error("Use a top-level markers: or floors: block.");
+    }
+
+    return this._parseSimpleLayoutYaml(value);
+  }
+
+  _parseSimpleLayoutYaml(text) {
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\t/g, "  "))
+      .filter((line) => line.trim() && !line.trim().startsWith("#"));
+    const root = lines[0]?.trim();
+
+    if (root === "markers: []") return { markers: [] };
+    if (root === "floors: []") return { floors: [] };
+    if (root === "markers:") {
+      return { markers: this._parseYamlObjectList(lines, 1, 2).items };
+    }
+    if (root === "floors:") {
+      return { floors: this._parseYamlObjectList(lines, 1, 2).items };
+    }
+
+    throw new Error("Use a top-level markers: or floors: block.");
+  }
+
+  _parseYamlObjectList(lines, startIndex, itemIndent) {
+    const items = [];
+    let index = startIndex;
+
+    while (index < lines.length) {
+      const line = lines[index];
+      const indent = this._yamlIndent(line);
+      const trimmed = line.trim();
+      if (indent < itemIndent) break;
+      if (indent !== itemIndent || !trimmed.startsWith("- ")) {
+        index += 1;
+        continue;
+      }
+
+      const item = {};
+      this._assignYamlPair(item, trimmed.slice(2));
+      index += 1;
+
+      while (index < lines.length) {
+        const childLine = lines[index];
+        const childIndent = this._yamlIndent(childLine);
+        const childTrimmed = childLine.trim();
+        if (childIndent <= itemIndent && childTrimmed.startsWith("- ")) break;
+        if (childIndent < itemIndent + 2) break;
+
+        if (childIndent === itemIndent + 2 && childTrimmed === "markers: []") {
+          item.markers = [];
+          index += 1;
+          continue;
+        }
+
+        if (childIndent === itemIndent + 2 && childTrimmed === "markers:") {
+          const parsed = this._parseYamlObjectList(lines, index + 1, itemIndent + 4);
+          item.markers = parsed.items;
+          index = parsed.index;
+          continue;
+        }
+
+        if (childIndent === itemIndent + 2) {
+          this._assignYamlPair(item, childTrimmed);
+        }
+        index += 1;
+      }
+
+      items.push(item);
+    }
+
+    return { items, index };
+  }
+
+  _assignYamlPair(target, text) {
+    const match = String(text || "").match(/^([^:]+):(?:\s*(.*))?$/);
+    if (!match) return;
+    const key = match[1].trim();
+    const value = match[2] ?? "";
+    target[key] = this._parseYamlScalar(value);
+  }
+
+  _parseYamlScalar(value) {
+    const text = String(value ?? "").trim();
+    if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+      return text.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    }
+    if (text === "true") return true;
+    if (text === "false") return false;
+    if (text !== "" && Number.isFinite(Number(text))) return Number(text);
+    return text;
+  }
+
+  _yamlIndent(line) {
+    return String(line || "").match(/^ */)?.[0].length || 0;
   }
 }
 
