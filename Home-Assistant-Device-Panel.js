@@ -1,4 +1,4 @@
-const VERSION = "2.8.5";
+const VERSION = "2.8.6";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -27,6 +27,9 @@ class OfflineDevicePanel extends HTMLElement {
     this._entities = [];
     this._devices = [];
     this._areas = [];
+    this._history = [];
+    this._activeTab = "devices";
+    this._historyFilters = { status: "both", area: "all", range: "1d" };
     this._hass = null;
     this._boundOutsideClick = (event) => this._handleOutsideClick(event);
   }
@@ -42,6 +45,9 @@ class OfflineDevicePanel extends HTMLElement {
       integrations: [],
       areas: [],
       excluded_entities: [],
+      show_history_chart: true,
+      history_max_points: 96,
+      history_sample_interval_minutes: 1440,
       domain_labels: {},
       integration_labels: {},
       force_simple: false,
@@ -49,6 +55,7 @@ class OfflineDevicePanel extends HTMLElement {
       ...config,
     };
     this._config = nextConfig;
+    this._history = this._loadHistory();
     this._filters = this._normalizedFilters({
       ...this._defaultFilters(),
       ...this._loadFilters(),
@@ -92,6 +99,12 @@ class OfflineDevicePanel extends HTMLElement {
     return `offline-device-panel:filters:${path}:${cardKey}`;
   }
 
+  _historyStorageKey() {
+    const path = window.location?.pathname || "dashboard";
+    const cardKey = this._config.storage_key || this._config.title || "offline-device-panel";
+    return `offline-device-panel:history:${path}:${cardKey}`;
+  }
+
   _loadFilters() {
     if (this._config.persist_filters === false) return {};
 
@@ -112,6 +125,79 @@ class OfflineDevicePanel extends HTMLElement {
     } catch (error) {
       console.warn("offline-device-panel: filters could not be saved", error);
     }
+  }
+
+  _loadHistory() {
+    try {
+      const value = localStorage.getItem(this._historyStorageKey());
+      const history = value ? JSON.parse(value) : [];
+      return Array.isArray(history) ? history.filter((entry) => entry && typeof entry === "object") : [];
+    } catch (error) {
+      console.warn("offline-device-panel: saved history could not be loaded", error);
+      return [];
+    }
+  }
+
+  _saveHistory() {
+    try {
+      localStorage.setItem(this._historyStorageKey(), JSON.stringify(this._history));
+    } catch (error) {
+      console.warn("offline-device-panel: history could not be saved", error);
+    }
+  }
+
+  _historyLimit() {
+    const limit = Number(this._config.history_max_points);
+    return Number.isFinite(limit) ? Math.max(6, Math.min(288, Math.round(limit))) : 96;
+  }
+
+  _historyIntervalMs() {
+    const minutes = Number(this._config.history_sample_interval_minutes);
+    return (Number.isFinite(minutes) ? Math.max(1, Math.min(1440, minutes)) : 1440) * 60 * 1000;
+  }
+
+  _recordHistory(rows) {
+    if (this._config.show_history_chart === false || !rows.length) return;
+
+    const snapshot = this._historySnapshot(rows);
+    const last = this._history[this._history.length - 1];
+    const changed = !last || last.signature !== snapshot.signature;
+    const due = !last || snapshot.ts - Number(last.ts || 0) >= this._historyIntervalMs();
+    if (!changed && !due) return;
+
+    this._history = [...this._history, snapshot].slice(-this._historyLimit());
+    this._saveHistory();
+  }
+
+  _historySnapshot(rows) {
+    const areas = {};
+    rows.forEach((row) => {
+      const area = row.areaName || "No area";
+      if (!areas[area]) areas[area] = { total: 0, offline: 0, online: 0 };
+      areas[area].total += 1;
+      if (row.offline) areas[area].offline += 1;
+      else areas[area].online += 1;
+    });
+
+    const total = rows.length;
+    const offline = rows.filter((row) => row.offline).length;
+    const online = total - offline;
+    const signature = JSON.stringify({
+      total,
+      offline,
+      areas: Object.entries(areas)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([area, counts]) => [area, counts.total, counts.offline]),
+    });
+
+    return {
+      ts: Date.now(),
+      total,
+      offline,
+      online,
+      areas,
+      signature,
+    };
   }
 
   _normalizedFilters(filters) {
@@ -380,12 +466,14 @@ class OfflineDevicePanel extends HTMLElement {
     const selectionEnd = typeof activeElement?.selectionEnd === "number" ? activeElement.selectionEnd : null;
 
     const allRows = this._deviceRows();
+    this._recordHistory(allRows);
     const rows = this._filteredRows();
     const offlineCount = allRows.filter((row) => row.offline).length;
     const onlineCount = allRows.length - offlineCount;
     const totalCount = allRows.length;
     const statusText = `${offlineCount} offline / ${onlineCount} online / ${totalCount} total`;
     const offlineAreas = this._offlineAreaSummary(allRows);
+    const activeTab = this._config.show_history_chart === false ? "devices" : this._activeTab;
 
     this.shadowRoot.innerHTML = `
       <ha-card>
@@ -395,36 +483,58 @@ class OfflineDevicePanel extends HTMLElement {
               <h2>${this._escape(this._config.title)}</h2>
               <p>${this._escape(statusText)}</p>
             </div>
+            ${this._tabsTemplate(activeTab)}
             <span class="${offlineCount ? "badge bad" : "badge good"}">
               ${offlineCount ? "Attention needed" : "All clear"}
             </span>
           </header>
           ${offlineCount ? this._alertTemplate(offlineCount, offlineAreas) : ""}
+          ${
+            activeTab === "history"
+              ? this._historyTemplate(allRows)
+              : `
+                <section class="filters">
+                  ${this._singleChoice("status", "Status", this._statusOptions())}
+                  ${
+                    this._config.force_simple
+                      ? ""
+                      : this._singleChoice("displayMode", "Card style", [
+                          ["detailed", "Detailed"],
+                          ["simple", "Simple"],
+                        ])
+                  }
+                  ${this._multiChoice("domains", "Type", "All types", this._labeledOptions(allRows, "domains"))}
+                  ${this._multiChoice("integrations", "Integrations", "All integrations", this._labeledOptions(allRows, "integrations"))}
+                  ${this._multiChoice("areas", "Areas", "All areas", this._options(allRows, "areaName"))}
+                  <label class="search">
+                    <span>Search</span>
+                    <input data-filter="search" value="${this._escape(this._filters.search)}" placeholder="Device, entity, area..." />
+                  </label>
+                </section>
 
-          <section class="filters">
-            ${this._singleChoice("status", "Status", this._statusOptions())}
-            ${
-              this._config.force_simple
-                ? ""
-                : this._singleChoice("displayMode", "Card style", [
-                    ["detailed", "Detailed"],
-                    ["simple", "Simple"],
-                  ])
-            }
-            ${this._multiChoice("domains", "Type", "All types", this._labeledOptions(allRows, "domains"))}
-            ${this._multiChoice("integrations", "Integrations", "All integrations", this._labeledOptions(allRows, "integrations"))}
-            ${this._multiChoice("areas", "Areas", "All areas", this._options(allRows, "areaName"))}
-            <label class="search">
-              <span>Search</span>
-              <input data-filter="search" value="${this._escape(this._filters.search)}" placeholder="Device, entity, area..." />
-            </label>
-          </section>
-
-          ${rows.length ? this._areasTemplate(rows) : this._emptyTemplate(allRows.length)}
+                ${rows.length ? this._areasTemplate(rows) : this._emptyTemplate(allRows.length)}
+              `
+          }
         </div>
       </ha-card>
       ${this._styles()}
     `;
+
+    this.shadowRoot.querySelectorAll("[data-panel-tab]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        this._activeTab = event.currentTarget.dataset.panelTab;
+        this._openMulti = null;
+        this._render({ preserveScroll: true });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-history-filter]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.historyFilter;
+        this._historyFilters = { ...this._historyFilters, [key]: event.currentTarget.value };
+        this._render({ preserveScroll: true });
+      });
+    });
 
     this.shadowRoot.querySelectorAll("[data-filter]").forEach((element) => {
       element.addEventListener("input", (event) => {
@@ -688,6 +798,238 @@ class OfflineDevicePanel extends HTMLElement {
     `;
   }
 
+  _tabsTemplate(activeTab) {
+    if (this._config.show_history_chart === false) return "";
+
+    return `
+      <nav class="panel-tabs" aria-label="Device panel views">
+        <button type="button" data-panel-tab="devices" class="${activeTab === "devices" ? "active" : ""}">
+          Devices List
+        </button>
+        <button type="button" data-panel-tab="history" class="${activeTab === "history" ? "active" : ""}">
+          History Charts
+        </button>
+      </nav>
+    `;
+  }
+
+  _historyTemplate(rows) {
+    if (this._config.show_history_chart === false || !rows.length || !this._history.length) return "";
+
+    const rawHistory = this._history.slice(-this._historyLimit());
+    const range = this._historyRangeOptions().some(([value]) => value === this._historyFilters.range) ? this._historyFilters.range : "1d";
+    const history = this._historyForRange(rawHistory, range);
+    const currentAreas = [...this._groupByArea(rows).keys()];
+    const historicalAreas = rawHistory.flatMap((entry) => Object.keys(entry.areas || {}));
+    const areas = [...new Set([...currentAreas, ...historicalAreas])].sort((a, b) => a.localeCompare(b));
+    const selectedArea = areas.includes(this._historyFilters.area) ? this._historyFilters.area : "all";
+    const metric = ["both", "online", "offline"].includes(this._historyFilters.status) ? this._historyFilters.status : "both";
+    this._historyFilters = { status: metric, area: selectedArea, range };
+    const visibleAreas = selectedArea === "all" ? areas : areas.filter((area) => area === selectedArea);
+    const series = [
+      {
+        label: "Total",
+        featured: true,
+        current: { total: rows.length, offline: rows.filter((row) => row.offline).length },
+        samples: history.map((entry) => ({ total: entry.total || 0, offline: entry.offline || 0, online: entry.online || 0, ts: entry.ts })),
+      },
+      ...visibleAreas.map((area) => {
+        const areaRows = rows.filter((row) => (row.areaName || "No area") === area);
+        return {
+          label: area,
+          current: { total: areaRows.length, offline: areaRows.filter((row) => row.offline).length },
+          samples: history.map((entry) => {
+            const counts = entry.areas?.[area];
+            if (!counts) return { total: null, offline: null, online: null, ts: entry.ts };
+            return { ...counts, ts: entry.ts };
+          }),
+        };
+      }),
+    ];
+
+    return `
+      <section class="history-panel" aria-label="Device availability history">
+        <div class="history-head">
+          <h3>Availability History</h3>
+          ${this._historyLegendTemplate(metric)}
+        </div>
+        ${this._historyControlsTemplate(areas)}
+        <div class="history-grid">
+          ${series.map((item) => this._historySeriesTemplate(item, metric)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  _historyRangeOptions() {
+    return [
+      ["10m", "10 min"],
+      ["30m", "30 mins"],
+      ["1h", "1 hour"],
+      ["3h", "3 hours"],
+      ["6h", "6 hours"],
+      ["12h", "12 hours"],
+      ["1d", "1 day"],
+      ["1w", "1 week"],
+      ["1mo", "1 month"],
+    ];
+  }
+
+  _historyRangeMs(range) {
+    const ranges = {
+      "10m": 10 * 60 * 1000,
+      "30m": 30 * 60 * 1000,
+      "1h": 60 * 60 * 1000,
+      "3h": 3 * 60 * 60 * 1000,
+      "6h": 6 * 60 * 60 * 1000,
+      "12h": 12 * 60 * 60 * 1000,
+      "1d": 24 * 60 * 60 * 1000,
+      "1w": 7 * 24 * 60 * 60 * 1000,
+      "1mo": 30 * 24 * 60 * 60 * 1000,
+    };
+    return ranges[range] || ranges["1d"];
+  }
+
+  _historyForRange(history, range) {
+    const cutoff = Date.now() - this._historyRangeMs(range);
+    const filtered = history.filter((entry) => Number(entry.ts) >= cutoff);
+    return filtered.length ? filtered : history.slice(-1);
+  }
+
+  _historyControlsTemplate(areas) {
+    const areaOptions = [
+      `<option value="all" ${this._historyFilters.area === "all" ? "selected" : ""}>All areas</option>`,
+      ...areas.map((area) => `<option value="${this._escape(area)}" ${this._historyFilters.area === area ? "selected" : ""}>${this._escape(area)}</option>`),
+    ].join("");
+    const rangeOptions = this._historyRangeOptions()
+      .map(([value, label]) => `<option value="${this._escape(value)}" ${this._historyFilters.range === value ? "selected" : ""}>${this._escape(label)}</option>`)
+      .join("");
+
+    return `
+      <div class="history-controls">
+        <label>
+          <span>Show</span>
+          <select data-history-filter="status">
+            <option value="both" ${this._historyFilters.status === "both" ? "selected" : ""}>Online and offline</option>
+            <option value="online" ${this._historyFilters.status === "online" ? "selected" : ""}>Online only</option>
+            <option value="offline" ${this._historyFilters.status === "offline" ? "selected" : ""}>Offline only</option>
+          </select>
+        </label>
+        <label>
+          <span>Area</span>
+          <select data-history-filter="area">${areaOptions}</select>
+        </label>
+        <label>
+          <span>Time frame</span>
+          <select data-history-filter="range">${rangeOptions}</select>
+        </label>
+      </div>
+    `;
+  }
+
+  _historyLegendTemplate(metric) {
+    const online = metric === "both" || metric === "online" ? `<span><i class="online-key"></i>Online</span>` : "";
+    const offline = metric === "both" || metric === "offline" ? `<span><i class="offline-key"></i>Offline</span>` : "";
+    return `<div class="history-legend">${online}${offline}</div>`;
+  }
+
+  _historySeriesTemplate(series, metric = "both") {
+    const currentOnline = Math.max(0, series.current.total - series.current.offline);
+    const chart = this._historyLineChart(series, metric);
+    const valueLabel =
+      metric === "online"
+        ? `${currentOnline} online`
+        : metric === "offline"
+          ? `${series.current.offline} offline`
+          : `${series.current.offline} offline / ${currentOnline} online`;
+
+    return `
+      <div class="history-row ${series.featured ? "featured" : ""}">
+        <div class="history-label">
+          <strong>${this._escape(series.label)}</strong>
+          <span>${this._escape(valueLabel)}</span>
+        </div>
+        ${chart}
+      </div>
+    `;
+  }
+
+  _historyLineChart(series, metric = "both") {
+    const width = 640;
+    const height = series.featured ? 180 : 92;
+    const padX = 10;
+    const padY = 10;
+    const validSamples = series.samples.filter((sample) => sample.total !== null);
+    if (!validSamples.length) {
+      return `<div class="history-empty-line">No area history yet</div>`;
+    }
+
+    const valuesForScale = validSamples.flatMap((sample) => {
+      if (metric === "online") return [Number(sample.online) || 0];
+      if (metric === "offline") return [Number(sample.offline) || 0];
+      return [Number(sample.online) || 0, Number(sample.offline) || 0];
+    });
+    const maxValue = Math.max(1, ...valuesForScale);
+    const point = (sample, index) => {
+      const x = series.samples.length === 1 ? width / 2 : padX + (index / (series.samples.length - 1)) * (width - padX * 2);
+      const scaleY = (value) => height - padY - (Math.max(0, Number(value) || 0) / maxValue) * (height - padY * 2);
+      return { x, onlineY: scaleY(sample.online), offlineY: scaleY(sample.offline) };
+    };
+    const onlinePoints = [];
+    const offlinePoints = [];
+    const onlineDots = [];
+    const offlineDots = [];
+    const markers = [];
+
+    series.samples.forEach((sample, index) => {
+      if (sample.total === null) return;
+      const p = point(sample, index);
+      onlinePoints.push(`${p.x.toFixed(2)},${p.onlineY.toFixed(2)}`);
+      offlinePoints.push(`${p.x.toFixed(2)},${p.offlineY.toFixed(2)}`);
+      onlineDots.push(`<circle class="history-dot online-dot" cx="${p.x.toFixed(2)}" cy="${p.onlineY.toFixed(2)}" r="3"></circle>`);
+      offlineDots.push(`<circle class="history-dot offline-dot" cx="${p.x.toFixed(2)}" cy="${p.offlineY.toFixed(2)}" r="3"></circle>`);
+      const offline = Math.max(0, Number(sample.offline) || 0);
+      const online = Math.max(0, Number(sample.online) || 0);
+      markers.push(`
+        <span
+          class="history-hit"
+          style="left: ${this._escape(((p.x / width) * 100).toFixed(2))}%"
+          title="${this._escape(`${this._formatHistoryTime(sample.ts)} - ${offline} offline / ${online} online`)}"
+        ></span>
+      `);
+    });
+
+    const showOnline = metric === "both" || metric === "online";
+    const showOffline = metric === "both" || metric === "offline";
+    const startLabel = this._formatHistoryTime(validSamples[0].ts);
+    const endLabel = this._formatHistoryTime(validSamples[validSamples.length - 1].ts);
+
+    return `
+      <div class="history-chart">
+        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${this._escape(series.label)} ${metric} trend">
+          <line class="history-grid-line" x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}"></line>
+          <line class="history-grid-line" x1="${padX}" y1="${padY}" x2="${width - padX}" y2="${padY}"></line>
+          ${showOnline ? `<polyline class="history-line online-line" points="${this._escape(onlinePoints.join(" "))}"></polyline>` : ""}
+          ${showOffline ? `<polyline class="history-line offline-line" points="${this._escape(offlinePoints.join(" "))}"></polyline>` : ""}
+          ${showOnline ? onlineDots.join("") : ""}
+          ${showOffline ? offlineDots.join("") : ""}
+        </svg>
+        <div class="history-hit-layer">${markers.join("")}</div>
+        <div class="history-axis">
+          <span>${this._escape(startLabel)}</span>
+          <span>Max ${this._escape(maxValue)}</span>
+          <span>${this._escape(endLabel)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  _formatHistoryTime(ts) {
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
   _alertTemplate(offlineCount, offlineAreas) {
     const visibleAreas = this._alertExpanded ? offlineAreas : offlineAreas.slice(0, 8);
     const hiddenAreaCount = Math.max(0, offlineAreas.length - visibleAreas.length);
@@ -818,11 +1160,15 @@ class OfflineDevicePanel extends HTMLElement {
         }
 
         header {
-          display: flex;
+          display: grid;
+          grid-template-columns: minmax(180px, 1fr) auto minmax(140px, 1fr);
           align-items: center;
-          justify-content: space-between;
           gap: 16px;
           margin-bottom: 16px;
+        }
+
+        header > div {
+          min-width: 0;
         }
 
         h2, h3, p {
@@ -841,6 +1187,7 @@ class OfflineDevicePanel extends HTMLElement {
         }
 
         .badge {
+          justify-self: end;
           border: 1px solid currentColor;
           border-radius: 999px;
           font-size: 13px;
@@ -957,6 +1304,237 @@ class OfflineDevicePanel extends HTMLElement {
           100% {
             box-shadow: 0 0 0 0 rgba(212, 54, 54, 0);
           }
+        }
+
+        .panel-tabs {
+          display: inline-flex;
+          gap: 4px;
+          justify-self: center;
+          border: 1px solid var(--odp-border);
+          border-radius: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+          padding: 4px;
+        }
+
+        .panel-tabs button {
+          min-height: 34px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: var(--odp-muted);
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          font-weight: 800;
+          padding: 0 14px;
+        }
+
+        .panel-tabs button.active {
+          background: var(--odp-card);
+          color: var(--primary-text-color);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        }
+
+        .history-panel {
+          display: grid;
+          gap: 12px;
+          margin: 0 0 18px;
+          border: 1px solid var(--odp-border);
+          border-radius: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+          padding: 12px;
+        }
+
+        .history-head,
+        .history-legend,
+        .history-row,
+        .history-label {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .history-head {
+          justify-content: space-between;
+        }
+
+        .history-legend span {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          color: var(--odp-muted);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .history-legend i {
+          display: inline-block;
+          width: 10px;
+          height: 10px;
+          border-radius: 3px;
+        }
+
+        .online-key {
+          background: var(--odp-good);
+        }
+
+        .offline-key {
+          background: var(--odp-bad);
+        }
+
+        .history-controls {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(160px, 240px));
+          gap: 10px;
+          align-items: end;
+        }
+
+        .history-controls label {
+          display: grid;
+          gap: 5px;
+        }
+
+        .history-controls span {
+          color: var(--odp-muted);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .history-grid {
+          display: grid;
+          gap: 14px;
+        }
+
+        .history-row {
+          min-width: 0;
+          border: 1px solid var(--odp-border);
+          border-left: 4px solid rgba(127, 127, 127, 0.42);
+          border-radius: 8px;
+          background: var(--odp-card);
+          padding: 12px;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+
+        .history-row.featured {
+          border-left-color: var(--primary-color, #03a9f4);
+        }
+
+        .history-label {
+          flex: 0 0 clamp(220px, 18vw, 320px);
+          justify-content: space-between;
+          min-width: 0;
+          align-self: stretch;
+          border-right: 1px solid var(--odp-border);
+          padding-right: 12px;
+        }
+
+        .history-label strong {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--primary-text-color);
+          font-size: 13px;
+        }
+
+        .history-label span {
+          flex: 0 0 auto;
+          color: var(--odp-muted);
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+
+        .history-chart {
+          position: relative;
+          display: grid;
+          gap: 4px;
+          width: 100%;
+          min-width: 0;
+        }
+
+        .history-chart svg {
+          display: block;
+          width: 100%;
+          height: 92px;
+          border-radius: 6px;
+          background: rgba(127, 127, 127, 0.07);
+        }
+
+        .history-row.featured .history-chart svg {
+          height: 180px;
+        }
+
+        .history-grid-line {
+          stroke: var(--odp-border);
+          stroke-width: 1;
+          vector-effect: non-scaling-stroke;
+        }
+
+        .history-line {
+          fill: none;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 2.5;
+          vector-effect: non-scaling-stroke;
+        }
+
+        .online-line {
+          stroke: var(--odp-good);
+        }
+
+        .offline-line {
+          stroke: var(--odp-bad);
+        }
+
+        .history-dot {
+          stroke: var(--odp-card);
+          stroke-width: 1.5;
+          vector-effect: non-scaling-stroke;
+        }
+
+        .online-dot {
+          fill: var(--odp-good);
+        }
+
+        .offline-dot {
+          fill: var(--odp-bad);
+        }
+
+        .history-row.featured .history-line {
+          stroke-width: 3;
+        }
+
+        .history-hit-layer {
+          position: absolute;
+          inset: 0 0 18px 0;
+        }
+
+        .history-hit {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          width: 16px;
+          transform: translateX(-50%);
+        }
+
+        .history-axis {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          color: var(--odp-muted);
+          font-size: 10px;
+          font-weight: 700;
+        }
+
+        .history-empty-line {
+          display: grid;
+          place-items: center;
+          min-height: 56px;
+          border: 1px dashed var(--odp-border);
+          border-radius: 6px;
+          color: var(--odp-muted);
+          font-size: 12px;
         }
 
         .filters {
@@ -1268,7 +1846,16 @@ class OfflineDevicePanel extends HTMLElement {
             padding: 14px;
           }
 
-          header, .area-title {
+          header {
+            grid-template-columns: 1fr;
+          }
+
+          .panel-tabs,
+          .badge {
+            justify-self: start;
+          }
+
+          .area-title {
             align-items: flex-start;
             flex-direction: column;
           }
@@ -1280,6 +1867,23 @@ class OfflineDevicePanel extends HTMLElement {
           .alert-areas {
             grid-column: 1 / -1;
             justify-content: flex-start;
+          }
+
+          .history-head,
+          .history-row {
+            align-items: stretch;
+            flex-direction: column;
+          }
+
+          .history-label {
+            flex: none;
+            border-right: 0;
+            border-bottom: 1px solid var(--odp-border);
+            padding: 0 0 10px;
+          }
+
+          .history-controls {
+            grid-template-columns: 1fr;
           }
 
           .filters {
@@ -1772,6 +2376,9 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
       integrations: [],
       areas: [],
       excluded_entities: [],
+      show_history_chart: true,
+      history_max_points: 96,
+      history_sample_interval_minutes: 1440,
       domain_labels: {},
       integration_labels: {},
       force_simple: false,
@@ -1823,6 +2430,9 @@ class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
           ${this._checkbox("show_online", "Allow online devices", { defaultValue: true })}
           ${this._checkbox("force_simple", "Force simple mode", { defaultValue: false })}
           ${this._checkbox("persist_filters", "Remember filters in this browser", { defaultValue: true })}
+          ${this._checkbox("show_history_chart", "Show availability history", { defaultValue: true })}
+          ${this._field("history_max_points", "History samples", { type: "number", min: 6, max: 288, step: 1, defaultValue: 96 })}
+          ${this._field("history_sample_interval_minutes", "History interval minutes", { type: "number", min: 1, max: 1440, step: 1, defaultValue: 1440 })}
           ${this._field("columns", "Columns")}
         </fieldset>
         <fieldset>

@@ -67,13 +67,23 @@ offline_states:
 
 ## UI Configuration
 
-Both cards include a visual Lovelace editor for the common options, including title, display mode, force simple mode, online visibility, display settings, and offline states.
+Both cards include a visual Lovelace editor for the common options, including title, display mode, force simple mode, online visibility, history display, display settings, and offline states.
 
 Domains, integrations, and areas can be selected from checkbox lists populated from the current Home Assistant entities and registries. Leaving a list empty means the card includes all values for that option.
 
 Both editors also include optional custom-name fields beside domains and integrations. Empty custom-name fields use the default Home Assistant/domain name.
 
 The Device Map Panel keeps floor images and marker layout in a YAML field inside the visual editor. Use **Floors and Markers** for the `floors:` layout, then apply it from the editor. You can still use the map's **Export YAML** tool after placing markers.
+
+The Offline Device Panel can show an availability history tab with line charts for the total device count and each area. The chart can be filtered to online, offline, or both, all areas or one selected area, and preset time frames from 10 minutes to 1 month. History is collected by the card while the dashboard is open and saved in this browser.
+
+```yaml
+type: custom:offline-device-panel
+title: Device Health
+show_history_chart: true
+history_max_points: 96
+history_sample_interval_minutes: 1440
+```
 
 ## Device Map Panel
 
@@ -292,5 +302,6 @@ integration_labels:
 - `domain_labels` and `integration_labels` only change display text. Filters still use the original Home Assistant domain/integration values.
 - `areas` can be area names or area IDs.
 - `excluded_entities` removes specific entity IDs from the Offline Device Panel before devices are grouped and counted. In the visual editor, these can be selected from a searchable entity list.
+- `show_history_chart`, `history_max_points`, and `history_sample_interval_minutes` control the browser-stored Online/Offline history chart in the Offline Device Panel.
 - The dashboard filters for domains, integrations, and areas support multiple checked values.
 - If an entity is not attached to a device in the registry, the card still shows it as its own fallback item.
