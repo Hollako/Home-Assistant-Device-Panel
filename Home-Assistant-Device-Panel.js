@@ -1,4 +1,4 @@
-const VERSION = "1.0.9";
+const VERSION = "1.0.10";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -177,6 +177,8 @@ class OfflineDevicePanel extends HTMLElement {
           domains: new Set(),
           integrations: new Set(),
           states: new Set(),
+          icons: new Set(),
+          deviceClasses: new Set(),
           offlineEntities: [],
           entityCount: 0,
           areaId,
@@ -191,6 +193,8 @@ class OfflineDevicePanel extends HTMLElement {
       row.domains.add(domain);
       row.integrations.add(integration);
       row.states.add(stateObj.state);
+      if (stateObj.attributes?.icon) row.icons.add(stateObj.attributes.icon);
+      if (stateObj.attributes?.device_class) row.deviceClasses.add(stateObj.attributes.device_class);
       row.entityCount += 1;
       if (isOffline) {
         row.offlineEntities.push({
@@ -219,6 +223,8 @@ class OfflineDevicePanel extends HTMLElement {
         domains,
         integrations,
         states,
+        icons: [...row.icons],
+        deviceClasses: [...row.deviceClasses],
       };
     });
 
@@ -244,6 +250,59 @@ class OfflineDevicePanel extends HTMLElement {
 
   _isOffline(state) {
     return this._config.offline_states.includes(String(state).toLowerCase());
+  }
+
+  _deviceIcon(row) {
+    const deviceClass = row.deviceClasses?.[0];
+    if (deviceClass) {
+      const classIcons = {
+        motion: "mdi:motion-sensor",
+        occupancy: "mdi:motion-sensor",
+        door: "mdi:door",
+        window: "mdi:window-closed",
+        garage_door: "mdi:garage",
+        opening: "mdi:door-open",
+        smoke: "mdi:smoke-detector",
+        gas: "mdi:gas-cylinder",
+        moisture: "mdi:water-alert",
+        temperature: "mdi:thermometer",
+        humidity: "mdi:water-percent",
+        illuminance: "mdi:brightness-5",
+        battery: "mdi:battery",
+        power: "mdi:flash",
+        energy: "mdi:lightning-bolt",
+        voltage: "mdi:sine-wave",
+        current: "mdi:current-ac",
+        plug: "mdi:power-plug",
+        lock: "mdi:lock",
+      };
+      if (classIcons[deviceClass]) return classIcons[deviceClass];
+    }
+
+    if (row.icons?.[0]) return row.icons[0];
+
+    const domainIcons = {
+      light: "mdi:lightbulb",
+      switch: "mdi:toggle-switch",
+      sensor: "mdi:eye",
+      binary_sensor: "mdi:checkbox-marked-circle-outline",
+      climate: "mdi:thermostat",
+      cover: "mdi:blinds",
+      lock: "mdi:lock",
+      camera: "mdi:cctv",
+      media_player: "mdi:speaker",
+      fan: "mdi:fan",
+      vacuum: "mdi:robot-vacuum",
+      alarm_control_panel: "mdi:shield-home",
+      device_tracker: "mdi:map-marker",
+      person: "mdi:account",
+      button: "mdi:gesture-tap-button",
+      scene: "mdi:palette",
+      script: "mdi:script-text",
+      automation: "mdi:home-automation",
+    };
+
+    return domainIcons[row.domains?.[0]] || "mdi:devices";
   }
 
   _filteredRows() {
@@ -612,12 +671,16 @@ class OfflineDevicePanel extends HTMLElement {
     const changed = row.lastChanged ? new Date(row.lastChanged).toLocaleString() : "Unknown";
     const stateLabel = row.offline ? "Offline" : "Online";
     const simple = this._filters.displayMode === "simple";
+    const icon = this._deviceIcon(row);
 
     return `
       <button class="device ${simple ? "simple" : "detailed"} ${row.offline ? "offline" : "online"}" data-entity="${this._escape(row.entityId)}">
         <span class="frame"></span>
         <span class="topline">
-          <span class="name">${this._escape(row.name)}</span>
+          <span class="identity">
+            <span class="device-icon"><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
+            <span class="name">${this._escape(row.name)}</span>
+          </span>
           <span class="pill">${this._escape(stateLabel)}</span>
         </span>
         ${
@@ -1017,6 +1080,33 @@ class OfflineDevicePanel extends HTMLElement {
 
         .topline {
           justify-content: space-between;
+        }
+
+        .identity {
+          display: grid;
+          grid-template-columns: 32px minmax(0, 1fr);
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .device-icon {
+          display: grid;
+          place-items: center;
+          width: 32px;
+          height: 32px;
+          border-radius: 8px;
+          color: var(--odp-good);
+          background: var(--odp-good-soft);
+        }
+
+        .offline .device-icon {
+          color: var(--odp-bad);
+          background: var(--odp-bad-soft);
+        }
+
+        .device-icon ha-icon {
+          --mdc-icon-size: 20px;
         }
 
         .name {
