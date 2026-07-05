@@ -1,4 +1,4 @@
-const VERSION = "2.8.9";
+const VERSION = "2.8.10";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -1928,6 +1928,10 @@ class AreaOfflineAlarmButton extends HTMLElement {
     this._entities = [];
     this._devices = [];
     this._areas = [];
+    this._unsubscribeStateChanged = null;
+    this._stateSubscriptionConnection = null;
+    this._stateRenderQueued = false;
+    this._lastSummarySignature = "";
   }
 
   setConfig(config) {
@@ -1955,12 +1959,115 @@ class AreaOfflineAlarmButton extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._loadRegistries(hass);
+    this._subscribeStateChanges(hass);
     this._render();
   }
 
   getCardSize() {
     const summary = this._summary();
     return summary.offline || this._config.show_when_clear ? 1 : 0;
+  }
+
+  connectedCallback() {
+    this._subscribeStateChanges(this._hass);
+  }
+
+  disconnectedCallback() {
+    this._unsubscribeStateChanges();
+  }
+
+  _subscribeStateChanges(hass) {
+    const connection = hass?.connection;
+    if (!connection?.subscribeEvents || this._stateSubscriptionConnection === connection) return;
+    this._unsubscribeStateChanges();
+    this._stateSubscriptionConnection = connection;
+
+    try {
+      this._unsubscribeStateChanged = connection.subscribeEvents((event) => this._handleStateChanged(event), "state_changed");
+    } catch (error) {
+      this._stateSubscriptionConnection = null;
+      console.warn("area-offline-alarm-button: state subscription failed", error);
+    }
+  }
+
+  _unsubscribeStateChanges() {
+    const unsubscribe = this._unsubscribeStateChanged;
+    this._unsubscribeStateChanged = null;
+    this._stateSubscriptionConnection = null;
+    if (!unsubscribe) return;
+
+    Promise.resolve(unsubscribe)
+      .then((unsubscribeFn) => {
+        if (typeof unsubscribeFn === "function") unsubscribeFn();
+      })
+      .catch((error) => console.warn("area-offline-alarm-button: state unsubscribe failed", error));
+  }
+
+  _handleStateChanged(event) {
+    const entityId = event?.data?.entity_id;
+    if (!entityId || !this._hass?.states) return;
+
+    const oldState = event.data.old_state;
+    const newState = event.data.new_state;
+    const relevant = this._stateChangeCanAffectSummary(entityId, oldState, newState);
+    this._applyStateChanged(entityId, newState);
+    if (relevant) this._queueStateRender();
+  }
+
+  _applyStateChanged(entityId, newState) {
+    const states = { ...(this._hass?.states || {}) };
+    if (newState) states[entityId] = newState;
+    else delete states[entityId];
+    this._hass = { ...this._hass, states };
+  }
+
+  _stateChangeCanAffectSummary(entityId, oldState, newState) {
+    const excludedEntities = new Set((this._config.excluded_entities || []).map((value) => String(value).trim()).filter(Boolean));
+    if (excludedEntities.has(entityId)) return false;
+
+    const domain = entityId.split(".")[0];
+    if (this._config.domains.length && !this._config.domains.includes(domain)) return false;
+
+    const oldOffline = oldState ? this._isOffline(oldState.state) : false;
+    const newOffline = newState ? this._isOffline(newState.state) : false;
+    const addedOrRemoved = !oldState || !newState;
+    if (!addedOrRemoved && oldOffline === newOffline) return false;
+
+    return this._stateMatchesArea(entityId, newState || oldState);
+  }
+
+  _stateMatchesArea(entityId, stateObj) {
+    const areaFilter = String(this._config.area_id || this._config.area || "").trim();
+    if (!areaFilter || !stateObj) return false;
+
+    if (!this._entities.length && !this._devices.length && !this._areas.length) return true;
+
+    const entity = this._entities.find((item) => item.entity_id === entityId);
+    const device = entity?.device_id ? this._devices.find((item) => item.id === entity.device_id) : null;
+    const areaId = entity?.area_id || device?.area_id || stateObj.attributes?.area_id || "unknown";
+    const area = this._areas.find((item) => (item.area_id || item.id) === areaId);
+    const areaName = area?.name || stateObj.attributes?.area || (areaId === "unknown" ? "No area" : areaId);
+    return this._areaMatches(areaFilter, areaId, areaName);
+  }
+
+  _queueStateRender() {
+    if (this._stateRenderQueued) return;
+    this._stateRenderQueued = true;
+    const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+    schedule.call(window, () => {
+      this._stateRenderQueued = false;
+      this._renderIfSummaryChanged();
+    });
+  }
+
+  _renderIfSummaryChanged() {
+    const summary = this._summary();
+    if (this._summarySignature(summary) === this._lastSummarySignature) return;
+    this._render(summary);
+  }
+
+  _summarySignature(summary) {
+    return `${summary.total}|${summary.offline}`;
   }
 
   async _loadRegistries(hass) {
@@ -2085,9 +2192,9 @@ class AreaOfflineAlarmButton extends HTMLElement {
     window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
   }
 
-  _render() {
+  _render(summary = this._summary()) {
     if (!this.shadowRoot) return;
-    const summary = this._summary();
+    this._lastSummarySignature = this._summarySignature(summary);
     const offline = summary.offline > 0;
     const emptyArea = !offline && summary.total === 0;
     const visible = offline || this._config.show_when_clear;
