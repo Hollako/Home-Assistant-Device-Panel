@@ -1,4 +1,4 @@
-const VERSION = "2.8.6";
+const VERSION = "2.8.8";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -1128,6 +1128,7 @@ class OfflineDevicePanel extends HTMLElement {
     return `<div class="empty">${this._escape(text)}</div>`;
   }
 
+
   _escape(value) {
     return String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -1900,6 +1901,309 @@ class OfflineDevicePanel extends HTMLElement {
 }
 
 customElements.define("offline-device-panel", OfflineDevicePanel);
+class AreaOfflineAlarmButton extends HTMLElement {
+  static getConfigElement() {
+    return document.createElement("area-offline-alarm-button-editor");
+  }
+
+  static getStubConfig() {
+    return {
+      area: "Studio Building Floor 1",
+      floor_id: "sb_f1",
+      map_path: "/dashboard-main/maps",
+      offline_states: ["unavailable", "unknown"],
+      show_when_clear: true,
+      show_count: true,
+      show_name: true,
+      button_height: 52,
+    };
+  }
+
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = {};
+    this._hass = null;
+    this._registriesLoaded = false;
+    this._entities = [];
+    this._devices = [];
+    this._areas = [];
+  }
+
+  setConfig(config) {
+    this._config = {
+      area: "",
+      area_id: "",
+      floor_id: "",
+      map_path: "/dashboard-main/maps",
+      offline_states: ["unavailable", "unknown"],
+      domains: [],
+      integrations: [],
+      excluded_entities: [],
+      show_when_clear: false,
+      show_count: true,
+      show_name: true,
+      button_height: 52,
+      icon: "mdi:alert-circle",
+      clear_icon: "mdi:check-circle-outline",
+      name: "Offline devices",
+      ...config,
+    };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._loadRegistries(hass);
+    this._render();
+  }
+
+  getCardSize() {
+    const summary = this._summary();
+    return summary.offline || this._config.show_when_clear ? 1 : 0;
+  }
+
+  async _loadRegistries(hass) {
+    if (this._registriesLoaded || !hass?.callWS) return;
+    this._registriesLoaded = true;
+
+    try {
+      const [entities, devices, areas] = await Promise.all([
+        hass.callWS({ type: "config/entity_registry/list" }),
+        hass.callWS({ type: "config/device_registry/list" }),
+        hass.callWS({ type: "config/area_registry/list" }),
+      ]);
+      this._entities = entities || [];
+      this._devices = devices || [];
+      this._areas = areas || [];
+      this._render();
+    } catch (error) {
+      console.warn("area-offline-alarm-button: registry lookup failed", error);
+    }
+  }
+
+  _summary() {
+    const rows = this._areaRows();
+    const offlineRows = rows.filter((row) => row.offline);
+    return {
+      rows,
+      offlineRows,
+      total: rows.length,
+      offline: offlineRows.length,
+    };
+  }
+
+  _areaRows() {
+    if (!this._hass?.states) return [];
+
+    const areaFilter = String(this._config.area_id || this._config.area || "").trim();
+    if (!areaFilter) return [];
+
+    const entityRegistry = new Map(this._entities.map((entity) => [entity.entity_id, entity]));
+    const deviceRegistry = new Map(this._devices.map((device) => [device.id, device]));
+    const areaRegistry = new Map(this._areas.map((area) => [area.area_id || area.id, area]));
+    const excludedEntities = new Set((this._config.excluded_entities || []).map((entityId) => String(entityId).trim()).filter(Boolean));
+    const grouped = new Map();
+
+    for (const [entityId, stateObj] of Object.entries(this._hass.states)) {
+      if (excludedEntities.has(entityId)) continue;
+      const domain = entityId.split(".")[0];
+      if (this._config.domains.length && !this._config.domains.includes(domain)) continue;
+
+      const entity = entityRegistry.get(entityId);
+      const device = entity?.device_id ? deviceRegistry.get(entity.device_id) : null;
+      const integration = this._integration(entity, stateObj);
+      if (this._config.integrations.length && !this._config.integrations.includes(integration)) continue;
+
+      const areaId = entity?.area_id || device?.area_id || stateObj.attributes?.area_id || "unknown";
+      const area = areaRegistry.get(areaId);
+      const areaName = area?.name || stateObj.attributes?.area || (areaId === "unknown" ? "No area" : areaId);
+      if (!this._areaMatches(areaFilter, areaId, areaName)) continue;
+
+      const key = entity?.device_id || entityId;
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          key,
+          entityId,
+          name: device?.name_by_user || device?.name || stateObj.attributes?.friendly_name || entityId,
+          offline: false,
+          offlineEntities: [],
+        });
+      }
+
+      const row = grouped.get(key);
+      const offline = this._isOffline(stateObj.state);
+      row.offline = row.offline || offline;
+      if (offline) {
+        row.offlineEntities.push({
+          entityId,
+          name: stateObj.attributes?.friendly_name || entity?.name || entityId,
+        });
+      }
+    }
+
+    return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  _areaMatches(filter, areaId, areaName) {
+    const normalizedFilter = this._normalizeAreaValue(filter);
+    return [areaId, areaName].some((value) => value && (value === filter || this._normalizeAreaValue(value) === normalizedFilter));
+  }
+
+  _normalizeAreaValue(value) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  _integration(entity, stateObj) {
+    if (entity?.platform) return entity.platform;
+    const attr = stateObj.attributes || {};
+    return attr.integration || attr.platform || "unknown";
+  }
+
+  _isOffline(state) {
+    return (this._config.offline_states || []).map((value) => String(value).toLowerCase()).includes(String(state).toLowerCase());
+  }
+
+  _navigationPath() {
+    const mapPath = String(this._config.map_path || "/dashboard-main/maps").trim();
+    const floorId = String(this._config.floor_id || this._config.floor || this._config.area_id || this._config.area || "").trim();
+    const joiner = mapPath.includes("?") ? "&" : "?";
+    return `${mapPath}${joiner}dmp_floor=${encodeURIComponent(floorId)}&dmp_offline=1`;
+  }
+
+  _navigate() {
+    const path = this._navigationPath();
+    if (/^https?:\/\//i.test(path)) {
+      window.location.assign(path);
+      return;
+    }
+    history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
+  }
+
+  _render() {
+    if (!this.shadowRoot) return;
+    const summary = this._summary();
+    const offline = summary.offline > 0;
+    const emptyArea = !offline && summary.total === 0;
+    const visible = offline || this._config.show_when_clear;
+    const icon = offline ? this._config.icon : emptyArea ? "mdi:map-marker-question" : this._config.clear_icon;
+    const buttonHeight = this._buttonHeight();
+    const showName = this._config.show_name !== false;
+    const areaLabel = this._config.area || this._config.area_id || "area";
+    const title = offline
+      ? `${summary.offline} offline ${summary.offline === 1 ? "device" : "devices"} in ${areaLabel} (${summary.total} matched)`
+      : emptyArea
+        ? `No entities matched ${areaLabel}. Check the area id/name or dashboard user permissions.`
+        : `No offline devices in ${areaLabel} (${summary.total} matched)`;
+    const label = this._config.name || (offline ? "Offline devices" : emptyArea ? "No area entities" : "Clear");
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: ${visible ? "block" : "none"};
+        }
+
+        ha-card {
+          border: 0;
+          background: transparent;
+          box-shadow: none;
+        }
+
+        button {
+          position: relative;
+          display: inline-grid;
+          grid-auto-flow: column;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-width: 44px;
+          min-height: ${buttonHeight}px;
+          width: 100%;
+          border: 1px solid rgba(255, 255, 255, 0.24);
+          border-radius: 12px;
+          background: ${offline ? "var(--error-color, #db4437)" : emptyArea ? "var(--warning-color, #f59e0b)" : "var(--success-color, #1d8f5f)"};
+          color: #fff;
+          cursor: pointer;
+          font: inherit;
+          font-weight: 800;
+          padding: ${showName ? "10px 12px" : "10px"};
+          transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+        }
+
+        button:hover {
+          filter: brightness(1.06);
+          transform: translateY(-1px);
+          box-shadow: ${offline ? "0 6px 18px rgba(219, 68, 55, 0.36)" : "0 4px 12px rgba(0, 0, 0, 0.14)"};
+        }
+
+        ha-icon {
+          --mdc-icon-size: 22px;
+        }
+
+        .name {
+          font-size: 13px;
+          line-height: 1.2;
+          white-space: nowrap;
+        }
+
+        .count {
+          position: absolute;
+          top: -7px;
+          right: -7px;
+          display: ${this._config.show_count && (offline || emptyArea) ? "grid" : "none"};
+          place-items: center;
+          min-width: 20px;
+          height: 20px;
+          border: 2px solid var(--card-background-color, #fff);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--error-color, #db4437);
+          font-size: 11px;
+          font-weight: 900;
+          line-height: 1;
+          padding: 0 5px;
+        }
+      </style>
+      <ha-card>
+        <button type="button" title="${this._escape(title)}" aria-label="${this._escape(title)}">
+          <ha-icon icon="${this._escape(icon)}"></ha-icon>
+          ${showName ? `<span class="name">${this._escape(label)}</span>` : ""}
+          <span class="count">${this._escape(offline ? summary.offline : summary.total)}</span>
+        </button>
+      </ha-card>
+    `;
+
+    this.shadowRoot.querySelector("button")?.addEventListener("click", () => this._navigate());
+  }
+
+  _buttonHeight() {
+    const value = Number(this._config.button_height);
+    if (!Number.isFinite(value)) return 52;
+    return Math.min(Math.max(value, 44), 96);
+  }
+
+  _escape(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+}
+
+customElements.define("area-offline-alarm-button", AreaOfflineAlarmButton);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "area-offline-alarm-button",
+  name: "Area Offline Alarm Button",
+  description: "Shows a red alarm button when any device in a Home Assistant area is offline and links to the matching map floor.",
+});
 
 class DevicePanelConfigEditor extends HTMLElement {
   constructor() {
@@ -1912,6 +2216,7 @@ class DevicePanelConfigEditor extends HTMLElement {
     this._hass = hass;
     this._handleHassChanged?.(hass);
   }
+
 
   _escape(value) {
     return String(value ?? "")
@@ -2355,6 +2660,190 @@ class DevicePanelConfigEditor extends HTMLElement {
   }
 }
 
+class AreaOfflineAlarmButtonEditor extends DevicePanelConfigEditor {
+  constructor() {
+    super();
+    this._entities = [];
+    this._areas = [];
+    this._registriesLoaded = false;
+    this._optionsSignature = "";
+  }
+
+  setConfig(config) {
+    const nextConfig = {
+      area: "",
+      area_id: "",
+      floor_id: "",
+      map_path: "/dashboard-main/maps",
+      offline_states: ["unavailable", "unknown"],
+      domains: [],
+      integrations: [],
+      excluded_entities: [],
+      show_when_clear: true,
+      show_count: true,
+      show_name: true,
+      button_height: 52,
+      icon: "mdi:alert-circle",
+      clear_icon: "mdi:check-circle-outline",
+      name: "Offline devices",
+      ...config,
+    };
+    if (!nextConfig.area && nextConfig.area_id) nextConfig.area = nextConfig.area_id;
+    this._config = nextConfig;
+    if (this._skipNextSetConfigRender) {
+      this._skipNextSetConfigRender = false;
+      return;
+    }
+    this._renderEditor();
+  }
+
+  _handleHassChanged(hass) {
+    this._loadEditorRegistries(hass);
+    this._renderEditorIfOptionsChanged();
+  }
+
+  async _loadEditorRegistries(hass) {
+    if (this._registriesLoaded || !hass?.callWS) return;
+    this._registriesLoaded = true;
+    try {
+      const [entities, areas] = await Promise.all([
+        hass.callWS({ type: "config/entity_registry/list" }),
+        hass.callWS({ type: "config/area_registry/list" }),
+      ]);
+      this._entities = entities || [];
+      this._areas = areas || [];
+      this._renderEditorIfOptionsChanged();
+    } catch (error) {
+      console.warn("area-offline-alarm-button-editor: registry lookup failed", error);
+    }
+  }
+
+  _renderEditor() {
+    if (!this._config) return;
+    this._optionsSignature = this._currentOptionsSignature();
+    this.shadowRoot.innerHTML = `
+      ${this._editorStyle()}
+      <div class="editor">
+        <fieldset>
+          <legend>Navigation</legend>
+          ${this._areaSelector()}
+          ${this._field("floor_id", "Map floor id")}
+          ${this._field("map_path", "Map dashboard path")}
+        </fieldset>
+        <fieldset>
+          <legend>Display</legend>
+          ${this._field("name", "Button label")}
+          ${this._field("button_height", "Button height", { type: "number", min: 44, max: 96, step: 1, defaultValue: 52 })}
+          ${this._checkbox("show_when_clear", "Show green button when clear", { defaultValue: true })}
+          ${this._checkbox("show_name", "Show text label", { defaultValue: true })}
+          ${this._checkbox("show_count", "Show count badge", { defaultValue: true })}
+          ${this._field("icon", "Offline icon")}
+          ${this._field("clear_icon", "Clear icon")}
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          ${this._textarea("offline_states", "Offline states", { rows: 3 })}
+          ${this._multiPicker("domains", "Domains to include", this._domainOptions())}
+          ${this._multiPicker("integrations", "Integrations to include", this._integrationOptions())}
+          ${this._textarea("excluded_entities", "Excluded entities", { rows: 3 })}
+        </fieldset>
+      </div>
+    `;
+    this._wireAreaSelector();
+    this._wireBasicInputs(["offline_states", "excluded_entities"]);
+    this._wireMultiPickers();
+    this._wirePickerSearch();
+  }
+
+  _renderEditorIfOptionsChanged() {
+    if (!this._config) return;
+    const signature = this._currentOptionsSignature();
+    if (signature === this._optionsSignature) return;
+    this._renderEditor();
+  }
+
+  _currentOptionsSignature() {
+    return JSON.stringify({
+      areas: this._areaOptions(),
+      domains: this._domainOptions(),
+      integrations: this._integrationOptions(),
+    });
+  }
+
+  _areaSelector() {
+    const selected = String(this._config.area || this._config.area_id || "");
+    const options = this._areaOptions();
+    if (!options.length) {
+      return `
+        <label>
+          <span>Home Assistant area</span>
+          <input data-config-area type="text" value="${this._escape(selected)}" />
+        </label>
+      `;
+    }
+
+    const optionMap = new Map([["", "Select an area"]]);
+    options.forEach(([value, text]) => optionMap.set(value, text));
+    if (selected && !optionMap.has(selected)) optionMap.set(selected, selected);
+
+    return `
+      <label>
+        <span>Home Assistant area</span>
+        <select data-config-area>
+          ${[...optionMap.entries()].map(([value, text]) => `<option value="${this._escape(value)}" ${value === selected ? "selected" : ""}>${this._escape(text)}</option>`).join("")}
+        </select>
+      </label>
+    `;
+  }
+
+  _wireAreaSelector() {
+    this.shadowRoot.querySelectorAll("[data-config-area]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const nextConfig = { ...this._config, area: event.currentTarget.value };
+        delete nextConfig.area_id;
+        this._emitConfig(nextConfig);
+      });
+    });
+  }
+
+  _areaOptions() {
+    const optionMap = new Map();
+    this._areas.forEach((area) => {
+      const areaId = String(area.area_id || area.id || "").trim();
+      const name = String(area.name || areaId).trim();
+      const value = areaId || name;
+      if (!value) return;
+      optionMap.set(value, name && name !== value ? `${name} (${value})` : value);
+    });
+
+    const states = this._hass?.states || {};
+    Object.values(states).forEach((stateObj) => {
+      [stateObj.attributes?.area_id, stateObj.attributes?.area].filter(Boolean).forEach((value) => {
+        const text = String(value);
+        if (!optionMap.has(text)) optionMap.set(text, text);
+      });
+    });
+
+    return [...optionMap.entries()].sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+  }
+
+  _domainOptions() {
+    const states = this._hass?.states || {};
+    return [...new Set(Object.keys(states).map((entityId) => entityId.split(".")[0]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  }
+
+  _integrationOptions() {
+    const states = this._hass?.states || {};
+    const fromRegistry = this._entities.map((entity) => entity.platform).filter(Boolean);
+    const fromStates = Object.values(states)
+      .flatMap((stateObj) => [stateObj.attributes?.integration, stateObj.attributes?.platform])
+      .filter(Boolean);
+    return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+}
+
+customElements.define("area-offline-alarm-button-editor", AreaOfflineAlarmButtonEditor);
+
 class OfflineDevicePanelEditor extends DevicePanelConfigEditor {
   constructor() {
     super();
@@ -2651,9 +3140,11 @@ class DeviceMapPanel extends HTMLElement {
     this._selectionBox = null;
     this._selectionBoxElement = null;
     this._pendingMarkerFocus = null;
+    this._lastExternalMapTargetKey = "";
     this._history = {};
     this._historyLimit = 30;
     this._boundKeydown = (event) => this._handleKeydown(event);
+    this._boundExternalMapNavigation = () => this._handleExternalMapNavigation();
   }
 
   setConfig(config) {
@@ -2688,6 +3179,8 @@ class DeviceMapPanel extends HTMLElement {
     this._applyStoredViewportForFloor(this._activeFloorId);
     this._floorMarkers = this._mergedFloorMarkers(this._configFloorMarkers(), this._loadMarkers());
     this._markers = this._floorMarkers[this._activeFloorId] || {};
+    this._lastExternalMapTargetKey = "";
+    this._applyExternalMapTarget();
     this._hasRenderedWithHass = false;
     this._registryRenderComplete = false;
     this._render();
@@ -2697,10 +3190,15 @@ class DeviceMapPanel extends HTMLElement {
     this._hass = hass;
     this._loadRegistries(hass);
     if (this._isControlActive()) return;
+    const externalTargetChanged = this._applyExternalMapTarget();
     if (!this._hasRenderedWithHass || (this._registriesLoaded && !this._registryRenderComplete)) {
       this._render({ preservePageScroll: true, preserveMapViewport: true });
       this._hasRenderedWithHass = true;
       if (this._registriesLoaded) this._registryRenderComplete = true;
+      return;
+    }
+    if (externalTargetChanged) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
       return;
     }
     this._updateLiveMapState();
@@ -2712,10 +3210,16 @@ class DeviceMapPanel extends HTMLElement {
 
   connectedCallback() {
     window.addEventListener("keydown", this._boundKeydown);
+    window.addEventListener("location-changed", this._boundExternalMapNavigation);
+    window.addEventListener("popstate", this._boundExternalMapNavigation);
+    window.addEventListener("hashchange", this._boundExternalMapNavigation);
   }
 
   disconnectedCallback() {
     window.removeEventListener("keydown", this._boundKeydown);
+    window.removeEventListener("location-changed", this._boundExternalMapNavigation);
+    window.removeEventListener("popstate", this._boundExternalMapNavigation);
+    window.removeEventListener("hashchange", this._boundExternalMapNavigation);
   }
 
   _canEdit() {
@@ -2794,7 +3298,11 @@ class DeviceMapPanel extends HTMLElement {
       if (this._config.areas.length && !this._config.areas.includes(areaName) && !this._config.areas.includes(areaId)) continue;
 
       const isOffline = this._isOffline(stateObj.state);
-      const deviceName = device?.name_by_user || device?.name || "";
+      const deviceName = this._deviceDisplayName(device);
+      const parentDeviceId = this._deviceParentId(device);
+      const parentDevice = parentDeviceId ? deviceRegistry.get(parentDeviceId) : null;
+      const parentDeviceName =
+        parentDeviceId && parentDeviceId !== device?.id ? this._deviceDisplayName(parentDevice, parentDeviceId) : "";
       const name = stateObj.attributes?.friendly_name || entity?.name || entity?.original_name || entityId;
       const icon = stateObj.attributes?.icon || "";
       const deviceClass = stateObj.attributes?.device_class || "";
@@ -2804,6 +3312,8 @@ class DeviceMapPanel extends HTMLElement {
         entityId,
         name,
         deviceName,
+        parentDeviceId,
+        parentDeviceName,
         offline: isOffline,
         domain,
         integration,
@@ -2827,6 +3337,18 @@ class DeviceMapPanel extends HTMLElement {
     }
 
     return rows.sort((a, b) => a.areaName.localeCompare(b.areaName) || a.name.localeCompare(b.name));
+  }
+
+  _deviceDisplayName(device, fallback = "") {
+    if (!device) return fallback;
+    return device.name_by_user || device.name || fallback;
+  }
+
+  _deviceParentId(device) {
+    const parent = device?.via_device_id || device?.parent_device_id || device?.hub_device_id || "";
+    if (Array.isArray(parent)) return parent[0] ? String(parent[0]) : "";
+    if (parent && typeof parent === "object") return String(parent.id || parent.device_id || "");
+    return parent ? String(parent) : "";
   }
 
   _integration(entity, stateObj) {
@@ -2958,7 +3480,8 @@ class DeviceMapPanel extends HTMLElement {
       if (this._filters.area !== "all" && row.areaName !== this._filters.area) return false;
       if (!search) return true;
 
-      const haystack = `${row.name} ${row.entityId} ${row.areaName} ${row.domain} ${row.integration} ${row.displayDomain} ${row.displayIntegration}`.toLowerCase();
+      const haystack =
+        `${row.name} ${row.entityId} ${row.areaName} ${row.domain} ${row.integration} ${row.displayDomain} ${row.displayIntegration} ${row.parentDeviceName} ${row.parentDeviceId}`.toLowerCase();
       return haystack.includes(search);
     });
   }
@@ -3519,17 +4042,7 @@ class DeviceMapPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-floor]").forEach((element) => {
       element.addEventListener("change", (event) => {
         const floorId = event.currentTarget.value;
-        if (!this._floors.some((floor) => floor.id === floorId)) return;
-        this._captureMapScroll();
-        this._mapScrollByFloor[this._activeFloorId] = { ...this._mapScroll };
-        this._floorMarkers[this._activeFloorId] = this._markers;
-        this._activeFloorId = floorId;
-        this._markers = this._floorMarkers[floorId] || {};
-        this._selectedMarkers.clear();
-        this._selectionBox = null;
-        this._applyStoredViewportForFloor(floorId);
-        this._mapScroll = this._mapScrollByFloor[floorId] || { left: 0, top: 0, leftRatio: 0, topRatio: 0, centerX: 0.5, centerY: 0.5, zoom: this._zoom };
-        this._render();
+        if (this._switchToFloor(floorId)) this._render();
       });
     });
 
@@ -4203,6 +4716,108 @@ class DeviceMapPanel extends HTMLElement {
     this._render();
   }
 
+  _handleExternalMapNavigation() {
+    this._lastExternalMapTargetKey = "";
+    if (this._applyExternalMapTarget({ force: true })) {
+      this._render({ preservePageScroll: true, preserveMapViewport: true });
+    }
+  }
+
+  _externalMapTarget() {
+    const params = new URLSearchParams(window.location?.search || "");
+    const floorValue = (params.get("dmp_floor") || params.get("map_floor") || "").trim();
+    const markerKey = (params.get("dmp_marker") || params.get("map_marker") || "").trim();
+    const offline = params.has("dmp_offline") ? this._truthyExternalParam(params.get("dmp_offline")) : false;
+    if (!floorValue && !markerKey && !offline) return null;
+    return { floorValue, markerKey, offline };
+  }
+
+  _truthyExternalParam(value) {
+    const text = String(value ?? "").trim().toLowerCase();
+    return !["0", "false", "no", "off"].includes(text);
+  }
+
+  _floorFromExternalValue(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const lower = raw.toLowerCase();
+    const normalized = this._normalizedFloorId(raw);
+    return (
+      this._floors.find((floor) => floor.id === raw || floor.id.toLowerCase() === lower || floor.name === raw || floor.name.toLowerCase() === lower || floor.id === normalized) || null
+    );
+  }
+
+  _normalizedFloorId(value) {
+    return (
+      String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || ""
+    );
+  }
+
+  _floorForMarker(markerKey) {
+    if (!markerKey) return null;
+    return this._floors.find((floor) => this._markerExistsOnFloor(floor.id, markerKey)) || null;
+  }
+
+  _markerExistsOnFloor(floorId, markerKey) {
+    const markers = floorId === this._activeFloorId ? this._markers : this._floorMarkers[floorId] || {};
+    return Object.prototype.hasOwnProperty.call(markers, markerKey);
+  }
+
+  _switchToFloor(floorId) {
+    if (!floorId || !this._floors.some((floor) => floor.id === floorId)) return false;
+    if (floorId === this._activeFloorId) return false;
+    this._captureMapScroll();
+    if (this._activeFloorId) {
+      this._mapScrollByFloor[this._activeFloorId] = { ...this._mapScroll };
+      this._floorMarkers[this._activeFloorId] = this._markers;
+    }
+    this._activeFloorId = floorId;
+    this._markers = this._floorMarkers[floorId] || {};
+    this._selectedMarkers.clear();
+    this._selectionBox = null;
+    this._applyStoredViewportForFloor(floorId);
+    this._mapScroll = this._mapScrollByFloor[floorId] || { left: 0, top: 0, leftRatio: 0, topRatio: 0, centerX: 0.5, centerY: 0.5, zoom: this._zoom };
+    return true;
+  }
+
+  _applyExternalMapTarget(options = {}) {
+    const target = this._externalMapTarget();
+    if (!target) {
+      this._lastExternalMapTargetKey = "";
+      return false;
+    }
+
+    let floor = this._floorFromExternalValue(target.floorValue);
+    if (!floor && target.markerKey) floor = this._floorForMarker(target.markerKey);
+    if (!floor) return false;
+
+    const rows = this._hass?.states ? this._deviceRows() : [];
+    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    let markerKey = target.markerKey;
+    const markerRequest = markerKey.toLowerCase();
+    if (target.offline && (!markerKey || ["first", "offline", "first-offline"].includes(markerRequest))) {
+      markerKey = this._offlineMarkersByFloor(rowByKey).find((marker) => marker.floorId === floor.id)?.key || "";
+    }
+    if (markerKey && !this._markerExistsOnFloor(floor.id, markerKey)) markerKey = "";
+
+    const completionPending = target.offline && !markerKey;
+    const targetKey = `${window.location?.pathname || ""}?${window.location?.search || ""}|${floor.id}|${markerKey}|${target.offline ? "offline" : ""}`;
+    if (!options.force && !completionPending && this._lastExternalMapTargetKey === targetKey) return false;
+
+    let changed = this._switchToFloor(floor.id);
+    if (markerKey) {
+      this._pendingMarkerFocus = markerKey;
+      changed = true;
+    }
+
+    this._lastExternalMapTargetKey = completionPending ? "" : targetKey;
+    return changed;
+  }
+
   _offlineMarkersByFloor(rowByKey) {
     return this._floors
       .flatMap((floor) => {
@@ -4278,12 +4893,15 @@ class DeviceMapPanel extends HTMLElement {
       marker.classList.toggle("state-inactive", stateClass === "state-inactive");
       marker.classList.toggle("state-neutral", stateClass === "state-neutral");
       marker.classList.toggle("selected", isEditing && this._selectedMarkers.has(key));
-      marker.title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+      marker.removeAttribute("title");
+      marker.setAttribute("aria-label", this._markerTitle(row));
       marker.dataset.entity = row.entityId;
       const icon = marker.querySelector("ha-icon");
       icon?.setAttribute("icon", this._markerIcon(row));
-      const label = marker.querySelector("strong");
+      const label = marker.querySelector(".marker-label");
       if (label) label.textContent = row.name;
+      const tooltip = marker.querySelector(".marker-tooltip");
+      if (tooltip) tooltip.innerHTML = this._markerTooltipTemplate(row);
     }
 
     const sidebarStatus = this.shadowRoot.querySelector(".sidebar-status");
@@ -4302,11 +4920,7 @@ class DeviceMapPanel extends HTMLElement {
       return;
     }
 
-    this._floorMarkers[this._activeFloorId] = this._markers;
-    this._activeFloorId = floorId;
-    this._markers = this._floorMarkers[floorId] || {};
-    this._selectedMarkers.clear();
-    this._selectionBox = null;
+    this._switchToFloor(floorId);
     this._pendingMarkerFocus = markerKey;
     this._render();
   }
@@ -4420,7 +5034,7 @@ class DeviceMapPanel extends HTMLElement {
     const size = this._display.markerSize;
     const icon = this._markerIcon(row);
     const stateClass = this._stateClass(row);
-    const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+    const title = this._markerTitle(row);
     return `
       <button
         class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
@@ -4428,11 +5042,29 @@ class DeviceMapPanel extends HTMLElement {
         draggable="${isEditing ? "true" : "false"}"
         data-marker="${this._escape(row.key)}"
         data-entity="${this._escape(row.entityId)}"
-        title="${this._escape(title)}"
+        aria-label="${this._escape(title)}"
       >
-        <span><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
-        ${this._display.showLabels ? `<strong>${this._escape(row.name)}</strong>` : ""}
+        <span class="marker-icon"><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
+        ${this._display.showLabels ? `<strong class="marker-label">${this._escape(row.name)}</strong>` : ""}
+        <span class="marker-tooltip" role="tooltip">${this._markerTooltipTemplate(row)}</span>
       </button>
+    `;
+  }
+
+  _markerTitle(row) {
+    const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+    return row.parentDeviceName ? `${title}\nConnected via ${row.parentDeviceName}` : title;
+  }
+
+  _markerTooltipTemplate(row) {
+    const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+    return `
+      <span class="marker-tooltip-line">${this._escape(title)}</span>
+      ${
+        row.parentDeviceName
+          ? `<span class="marker-tooltip-line marker-tooltip-parent">Connected via <strong>${this._escape(row.parentDeviceName)}</strong></span>`
+          : ""
+      }
     `;
   }
 
@@ -4498,6 +5130,7 @@ class DeviceMapPanel extends HTMLElement {
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }
+
 
   _escape(value) {
     return String(value ?? "")
@@ -4680,7 +5313,7 @@ class DeviceMapPanel extends HTMLElement {
           cursor: grabbing;
         }
 
-        .dot, .marker span {
+        .dot, .marker .marker-icon {
           display: grid;
           place-items: center;
           border-radius: 999px;
@@ -4688,7 +5321,7 @@ class DeviceMapPanel extends HTMLElement {
           color: #fff;
         }
 
-        .offline .dot, .marker.offline span {
+        .offline .dot, .marker.offline .marker-icon {
           background: var(--dmp-bad);
         }
 
@@ -5420,6 +6053,11 @@ class DeviceMapPanel extends HTMLElement {
           outline-offset: 4px;
         }
 
+        .marker:hover,
+        .marker:focus-visible {
+          z-index: 8;
+        }
+
         .marker.jump-focus {
           outline: 4px solid var(--dmp-bad);
           outline-offset: 7px;
@@ -5435,7 +6073,7 @@ class DeviceMapPanel extends HTMLElement {
           }
         }
 
-        .marker span {
+        .marker .marker-icon {
           display: grid;
           flex: 0 0 var(--marker-size);
           place-items: center;
@@ -5448,35 +6086,35 @@ class DeviceMapPanel extends HTMLElement {
           line-height: 0;
         }
 
-        .marker.online span {
+        .marker.online .marker-icon {
           background: var(--dmp-good);
         }
 
-        .marker.offline span {
+        .marker.offline .marker-icon {
           background: var(--dmp-bad);
           box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.85), 0 0 15px rgba(212, 54, 54, 0.9);
         }
 
-        .marker.state-mode.online span {
+        .marker.state-mode.online .marker-icon {
           box-shadow: 0 0 0 3px rgba(29, 143, 95, 0.96), 0 0 16px rgba(29, 143, 95, 0.8);
         }
 
-        .marker.state-mode.state-active span {
+        .marker.state-mode.state-active .marker-icon {
           background: #f5c542;
           color: #111;
         }
 
-        .marker.state-mode.state-inactive span {
+        .marker.state-mode.state-inactive .marker-icon {
           background: #111827;
           color: #fff;
         }
 
-        .marker.state-mode.state-neutral span {
+        .marker.state-mode.state-neutral .marker-icon {
           background: #64748b;
           color: #fff;
         }
 
-        .marker.state-mode.offline span {
+        .marker.state-mode.offline .marker-icon {
           background: var(--dmp-bad);
           color: #fff;
           box-shadow: 0 0 0 3px rgba(212, 54, 54, 0.98), 0 0 18px rgba(212, 54, 54, 0.95);
@@ -5490,7 +6128,7 @@ class DeviceMapPanel extends HTMLElement {
           line-height: 1;
         }
 
-        .marker strong {
+        .marker-label {
           display: block;
           min-width: 0;
           max-width: calc(240px - var(--marker-size) - 24px);
@@ -5498,6 +6136,67 @@ class DeviceMapPanel extends HTMLElement {
           text-overflow: ellipsis;
           white-space: nowrap;
           font-size: 12px;
+        }
+
+        .marker-tooltip {
+          position: absolute;
+          left: 50%;
+          bottom: calc(100% + 10px);
+          z-index: 20;
+          display: grid;
+          gap: 4px;
+          width: max-content;
+          max-width: min(300px, 72vw);
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: var(--card-background-color, #fff);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+          color: var(--primary-text-color);
+          font-size: 12px;
+          line-height: 1.35;
+          opacity: 0;
+          padding: 8px 10px;
+          pointer-events: none;
+          text-align: left;
+          transform: translate(-50%, 4px);
+          transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+          visibility: hidden;
+          white-space: nowrap;
+        }
+
+        .marker-tooltip::after {
+          position: absolute;
+          left: 50%;
+          bottom: -5px;
+          width: 10px;
+          height: 10px;
+          border-right: 1px solid var(--dmp-border);
+          border-bottom: 1px solid var(--dmp-border);
+          background: var(--card-background-color, #fff);
+          content: "";
+          transform: translateX(-50%) rotate(45deg);
+        }
+
+        .marker:hover .marker-tooltip,
+        .marker:focus-visible .marker-tooltip {
+          opacity: 1;
+          transform: translate(-50%, 0);
+          visibility: visible;
+        }
+
+        .marker-tooltip-line {
+          display: block;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .marker-tooltip-parent {
+          color: var(--secondary-text-color, #64748b);
+        }
+
+        .marker-tooltip-parent strong {
+          color: var(--primary-text-color);
+          font-weight: 800;
         }
 
         .missing-image {

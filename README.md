@@ -142,7 +142,7 @@ Use the map zoom controls to zoom from 50% to 400%. The drawing and markers scal
 
 Markers automatically choose icons from the device/entity type when possible, such as bulbs for lights and motion icons for motion sensors. In Edit Mode, placed devices also show an icon picker in the sidebar so admins can override the marker icon.
 
-Use the display controls on the map to make markers smaller or larger and to show or hide marker names. When marker names are hidden, hovering over a marker still shows the device name. When zoomed in, drag the map background to pan around the floor plan.
+Use the display controls on the map to make markers smaller or larger and to show or hide marker names. When marker names are hidden, hovering over a marker still shows the device name, and child devices also show their connected parent device when Home Assistant reports one. When zoomed in, drag the map background to pan around the floor plan.
 
 By default, marker color shows availability only: green for online and red for offline. To also show entity state, enable `show_entity_state`. In that mode, the marker glow/ring still shows availability, while the inside color shows state: yellow for active/on/detected, black for inactive/off/clear, and full red when offline.
 
@@ -154,6 +154,22 @@ show_entity_state: true
 ```
 
 When placed markers are offline, the map shows an offline marker notification list above the floorplan. Click an offline marker in that list to switch to the correct floor, center the map on the marker, and briefly highlight it.
+
+The map can also be opened from another dashboard view with URL parameters. Use `dmp_floor` with a floor `id` or name, and add `dmp_offline=1` to focus the first offline marker on that floor:
+
+```yaml
+tap_action:
+  action: navigate
+  navigation_path: /your-dashboard/maps?dmp_floor=studio-building-floor-3&dmp_offline=1
+```
+
+Use `dmp_marker` when you want to focus a specific marker key or entity instead:
+
+```yaml
+tap_action:
+  action: navigate
+  navigation_path: /your-dashboard/maps?dmp_floor=studio-building-floor-3&dmp_marker=light.kitchen
+```
 
 Marker positions are saved in the browser automatically. Open **Export YAML** to copy the current marker layout into your dashboard configuration:
 
@@ -233,6 +249,34 @@ excluded_entities:
 offline_states:
   - unavailable
   - unknown
+```
+
+## Area Offline Alarm Button
+
+Use `custom:area-offline-alarm-button` on another dashboard view when each Home Assistant area represents a floor. The button scans all entities assigned to that area, turns red when any device in the area is `unavailable` or `unknown`, turns green when clear if enabled, and navigates to the matching map floor.
+
+The card includes a visual editor in Lovelace. Add **Area Offline Alarm Button**, then set the Home Assistant area, Map floor id, and Map dashboard path. Disable **Show text label** for icon-only mode.
+
+```yaml
+type: custom:area-offline-alarm-button
+area: SB F1
+floor_id: sb_f1
+map_path: /dashboard-main/maps
+show_when_clear: true
+show_name: true
+button_height: 52
+```
+
+By default the card hides itself when the area is healthy. To keep a green button visible when all devices are online, set `show_when_clear: true`. To show only the icon, set `show_name: false`.
+
+Optional filters work like the Offline Device Panel, so you can limit the alarm to specific domains or integrations:
+
+```yaml
+domains:
+  - light
+  - switch
+integrations:
+  - mqtt
 ```
 
 ## Persistent Filters
