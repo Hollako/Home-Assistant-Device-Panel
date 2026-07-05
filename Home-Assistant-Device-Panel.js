@@ -1,4 +1,4 @@
-const VERSION = "2.8.10";
+const VERSION = "2.8.11";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -4149,7 +4149,10 @@ class DeviceMapPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-floor]").forEach((element) => {
       element.addEventListener("change", (event) => {
         const floorId = event.currentTarget.value;
-        if (this._switchToFloor(floorId)) this._render();
+        if (this._switchToFloor(floorId)) {
+          this._syncMapUrl({ floorId });
+          this._render();
+        }
       });
     });
 
@@ -4830,6 +4833,29 @@ class DeviceMapPanel extends HTMLElement {
     }
   }
 
+  _syncMapUrl({ floorId = this._activeFloorId, markerKey = "" } = {}) {
+    if (!floorId || !window.location || !window.history?.replaceState) return;
+
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("dmp_floor", floorId);
+      url.searchParams.delete("map_floor");
+      url.searchParams.delete("dmp_offline");
+      url.searchParams.delete("map_offline");
+      url.searchParams.delete("dmp_marker");
+      url.searchParams.delete("map_marker");
+      if (markerKey) url.searchParams.set("dmp_marker", markerKey);
+
+      const next = `${url.pathname}${url.search}${url.hash}`;
+      const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (next === current) return;
+
+      window.history.replaceState(null, "", next);
+      this._lastExternalMapTargetKey = "";
+    } catch (error) {
+      console.warn("device-map-panel: map URL sync failed", error);
+    }
+  }
   _externalMapTarget() {
     const params = new URLSearchParams(window.location?.search || "");
     const floorValue = (params.get("dmp_floor") || params.get("map_floor") || "").trim();
@@ -5021,6 +5047,7 @@ class DeviceMapPanel extends HTMLElement {
 
   _jumpToMarker(floorId, markerKey) {
     if (!floorId || !markerKey || !this._floors.some((floor) => floor.id === floorId)) return;
+    this._syncMapUrl({ floorId, markerKey });
     if (floorId === this._activeFloorId) {
       this._pendingMarkerFocus = null;
       this._focusMarker(markerKey);
