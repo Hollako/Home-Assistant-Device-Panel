@@ -255,7 +255,7 @@ offline_states:
 
 Use `custom:area-offline-alarm-button` on another dashboard view when each Home Assistant area represents a floor. The button scans all entities assigned to that area, turns red when any device in the area is `unavailable` or `unknown`, turns green when clear if enabled, and navigates to the matching map floor.
 
-The card includes a visual editor in Lovelace. Add **Area Offline Alarm Button**, then set the Home Assistant area, Map floor id, and Map dashboard path. Disable **Show text label** for icon-only mode.
+The card includes a visual editor in Lovelace. Add **Area Offline Alarm Button**, then set the Home Assistant area, Map floor id, and Map dashboard path. The button opens the matching map floor without focusing an arbitrary marker. Disable **Show text label** for icon-only mode.
 
 ```yaml
 type: custom:area-offline-alarm-button

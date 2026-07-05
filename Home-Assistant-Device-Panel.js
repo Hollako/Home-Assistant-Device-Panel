@@ -1,4 +1,4 @@
-const VERSION = "2.8.11";
+const VERSION = "2.8.12";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -2179,7 +2179,7 @@ class AreaOfflineAlarmButton extends HTMLElement {
     const mapPath = String(this._config.map_path || "/dashboard-main/maps").trim();
     const floorId = String(this._config.floor_id || this._config.floor || this._config.area_id || this._config.area || "").trim();
     const joiner = mapPath.includes("?") ? "&" : "?";
-    return `${mapPath}${joiner}dmp_floor=${encodeURIComponent(floorId)}&dmp_offline=1`;
+    return `${mapPath}${joiner}dmp_floor=${encodeURIComponent(floorId)}`;
   }
 
   _navigate() {
