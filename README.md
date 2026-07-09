@@ -1,6 +1,6 @@
 # Home Assistant Device Panel
 
-![Home Assistant Device Panel preview](assets/preview.svg)
+![Home Assistant Device Panel preview](assets/preview.png)
 
 A Lovelace custom card for a clear Home Assistant dashboard view of offline devices.
 
