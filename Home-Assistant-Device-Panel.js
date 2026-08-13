@@ -1,4 +1,4 @@
-const VERSION = "2.8.12";
+const VERSION = "2.8.15";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -3184,6 +3184,7 @@ class DeviceMapPanel extends HTMLElement {
       title: "Device Map",
       image: "/local/floorplan.png",
       offline_states: ["unavailable", "unknown"],
+      sidebar_mode: "entities",
       markers: [],
       floors: [],
     };
@@ -3238,6 +3239,7 @@ class DeviceMapPanel extends HTMLElement {
     this._registryRenderComplete = false;
     this._mapAlertScrollLeft = 0;
     this._deviceListScrollTop = 0;
+    this._openDeviceGroups = new Set();
     this._isPanning = false;
     this._isSelecting = false;
     this._isJumping = false;
@@ -3269,6 +3271,7 @@ class DeviceMapPanel extends HTMLElement {
       marker_size: 18,
       show_labels: true,
       show_entity_state: false,
+      sidebar_mode: "entities",
       nudge_step: 1,
       ...config,
     };
@@ -3416,7 +3419,9 @@ class DeviceMapPanel extends HTMLElement {
 
       rows.push({
         key: entityId,
+        markerType: "entity",
         entityId,
+        deviceId: entity?.device_id || "",
         name,
         deviceName,
         parentDeviceId,
@@ -3478,6 +3483,7 @@ class DeviceMapPanel extends HTMLElement {
 
   _stateClass(row) {
     if (!this._config.show_entity_state) return "";
+    if (row.markerType === "device") return row.offline ? "" : "state-neutral";
     const state = String(row.primaryState || "").toLowerCase();
     const activeStates = ["on", "open", "opening", "unlocked", "detected", "motion", "home", "playing", "heat", "cool"];
     const inactiveStates = ["off", "closed", "closing", "locked", "clear", "none", "not_home", "idle", "standby"];
@@ -3588,9 +3594,72 @@ class DeviceMapPanel extends HTMLElement {
       if (!search) return true;
 
       const haystack =
-        `${row.name} ${row.entityId} ${row.areaName} ${row.domain} ${row.integration} ${row.displayDomain} ${row.displayIntegration} ${row.parentDeviceName} ${row.parentDeviceId}`.toLowerCase();
+        `${row.name} ${row.entityId} ${row.deviceName} ${row.deviceId} ${row.areaName} ${row.domain} ${row.integration} ${row.displayDomain} ${row.displayIntegration} ${row.parentDeviceName} ${row.parentDeviceId}`.toLowerCase();
       return haystack.includes(search);
     });
+  }
+
+  _markerRows(entityRows = this._deviceRows()) {
+    return [...entityRows, ...this._deviceMarkerRows(entityRows)];
+  }
+
+  _deviceMarkerRows(entityRows) {
+    return this._deviceSidebarGroups(entityRows)
+      .filter((group) => group.deviceId)
+      .map((group) => {
+        const primaryRow = this._primaryDeviceRow(group.rows);
+        const domains = this._uniqueValues(group.rows.flatMap((row) => row.domains || row.domain));
+        const integrations = this._uniqueValues(group.rows.flatMap((row) => row.integrations || row.integration));
+        const states = this._uniqueValues(group.rows.flatMap((row) => row.states || row.state));
+        const icons = this._uniqueValues(group.rows.flatMap((row) => row.icons || []));
+        const deviceClasses = this._uniqueValues(group.rows.flatMap((row) => row.deviceClasses || []));
+        const offlineEntities = group.rows
+          .filter((row) => row.offline)
+          .flatMap((row) => row.offlineEntities?.length ? row.offlineEntities : [{ entityId: row.entityId, name: row.name }]);
+
+        return {
+          key: group.markerKey,
+          markerType: "device",
+          entityId: primaryRow?.entityId || "",
+          deviceId: group.deviceId,
+          name: group.name,
+          deviceName: group.name,
+          parentDeviceId: primaryRow?.parentDeviceId || "",
+          parentDeviceName: primaryRow?.parentDeviceName || "",
+          offline: group.offline,
+          domain: "device",
+          integration: integrations[0] || "unknown",
+          displayDomain: "Device",
+          displayIntegration: integrations.map((integration) => this._integrationLabel(integration)).join(", ") || "Device",
+          state: group.offline ? `${group.offlineCount} offline` : "online",
+          domains,
+          integrations,
+          states,
+          icons,
+          deviceClasses,
+          primaryState: group.offline ? "unavailable" : "online",
+          primaryDomain: "device",
+          primaryDeviceClass: primaryRow?.primaryDeviceClass || "",
+          offlineEntities,
+          entityCount: group.rows.length,
+          areaId: primaryRow?.areaId || "",
+          areaName: group.areaName,
+          lastChanged: primaryRow?.lastChanged || "",
+          childRows: group.rows,
+        };
+      });
+  }
+
+  _deviceMarkerKey(deviceId) {
+    return deviceId ? `device:${deviceId}` : "";
+  }
+
+  _primaryDeviceRow(rows = []) {
+    return rows.find((row) => row.offline) || rows.find((row) => row.domain === "light") || rows.find((row) => row.domain === "switch") || rows[0] || null;
+  }
+
+  _uniqueValues(values) {
+    return [...new Set((values || []).flat().filter(Boolean).map((value) => String(value)))];
   }
 
   _normalizedFloors(config) {
@@ -3708,11 +3777,33 @@ class DeviceMapPanel extends HTMLElement {
 
   _markersFromList(markersList) {
     return (markersList || []).reduce((markers, marker) => {
-      const key = marker.entity || marker.key || marker.device;
+      const type = String(marker.type || "").toLowerCase();
+      const configuredDeviceId = marker.device_id || marker.deviceId || "";
+      const isDeviceMarker = type === "device" || Boolean(configuredDeviceId && !marker.entity && !marker.entityId);
+
+      if (isDeviceMarker) {
+        const deviceId = String(configuredDeviceId || "").trim();
+        const key = this._deviceMarkerKey(deviceId);
+        if (!key) return markers;
+        markers[key] = {
+          key,
+          type: "device",
+          deviceId,
+          entityId: marker.primary_entity || marker.primaryEntity || marker.entity || marker.entityId || "",
+          name: marker.name || "",
+          icon: marker.icon || "",
+          x: Number(marker.x),
+          y: Number(marker.y),
+        };
+        return markers;
+      }
+
+      const key = marker.entity || marker.entityId || marker.key || marker.device;
       if (!key) return markers;
       markers[key] = {
         key,
-        entityId: marker.entity || key,
+        type: "entity",
+        entityId: marker.entity || marker.entityId || key,
         name: marker.name || "",
         icon: marker.icon || "",
         x: Number(marker.x),
@@ -3727,10 +3818,30 @@ class DeviceMapPanel extends HTMLElement {
       const x = Number(marker.x);
       const y = Number(marker.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return result;
+      const type = marker.type === "device" || marker.deviceId || marker.device_id || String(key).startsWith("device:") ? "device" : "entity";
+
+      if (type === "device") {
+        const deviceId = String(marker.deviceId || marker.device_id || String(key).replace(/^device:/, "") || "").trim();
+        const markerKey = this._deviceMarkerKey(deviceId);
+        if (!markerKey) return result;
+        result[markerKey] = {
+          key: markerKey,
+          type: "device",
+          deviceId,
+          entityId: marker.entityId || marker.primaryEntity || marker.primary_entity || marker.entity || "",
+          name: marker.name || "",
+          icon: marker.icon || "",
+          x: Math.max(0, Math.min(100, x)),
+          y: Math.max(0, Math.min(100, y)),
+        };
+        return result;
+      }
+
       const entityId = marker.entityId || marker.entity || key;
       const markerKey = entityId || key;
       result[markerKey] = {
         key: markerKey,
+        type: "entity",
         entityId,
         name: marker.name || "",
         icon: marker.icon || "",
@@ -3940,8 +4051,9 @@ class DeviceMapPanel extends HTMLElement {
     const selectionEnd = typeof activeElement?.selectionEnd === "number" ? activeElement.selectionEnd : null;
 
     const rows = this._deviceRows();
+    const markerRows = this._markerRows(rows);
     const filteredRows = this._filteredRows(rows);
-    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const rowByKey = new Map(markerRows.map((row) => [row.key, row]));
     const activeFloor = this._activeFloor();
     const floorTitle = this._hasMultipleFloors() ? `${this._config.title} - ${activeFloor.name}` : this._config.title;
     const offlineMarkers = this._offlineMarkersByFloor(rowByKey);
@@ -3983,12 +4095,12 @@ class DeviceMapPanel extends HTMLElement {
             <section class="bulk-actions">
               <button type="button" data-auto-place="filtered">Add visible unplaced</button>
             </section>
-            <section class="devices">
-              ${filteredRows.map((row) => this._deviceListItem(row)).join("") || `<div class="empty-list">No devices match</div>`}
+            <section class="devices ${this._sidebarMode() === "devices" ? "grouped" : ""}">
+              ${this._sidebarListTemplate(filteredRows)}
             </section>
             <details class="export" data-export ${this._exportOpen ? "open" : ""}>
               <summary>Export YAML</summary>
-              <textarea readonly>${this._escape(this._yamlExport(rows))}</textarea>
+              <textarea readonly>${this._escape(this._yamlExport(markerRows))}</textarea>
             </details>
           </aside>
           `
@@ -4241,6 +4353,15 @@ class DeviceMapPanel extends HTMLElement {
       deviceList.addEventListener("scroll", () => this._captureDeviceListScroll());
     }
 
+    this.shadowRoot.querySelectorAll("[data-device-group]").forEach((element) => {
+      element.addEventListener("toggle", (event) => {
+        const key = event.currentTarget.dataset.deviceGroup;
+        if (!key) return;
+        if (event.currentTarget.open) this._openDeviceGroups.add(key);
+        else this._openDeviceGroups.delete(key);
+      });
+    });
+
     if (!isEditing) {
       this.shadowRoot.querySelectorAll("[data-marker]").forEach((element) => {
         element.addEventListener("click", (event) => {
@@ -4262,7 +4383,9 @@ class DeviceMapPanel extends HTMLElement {
     });
 
     this.shadowRoot.querySelectorAll("[data-device]").forEach((element) => {
+      element.addEventListener("click", (event) => event.stopPropagation());
       element.addEventListener("dragstart", (event) => {
+        event.stopPropagation();
         event.dataTransfer.setData("text/plain", event.currentTarget.dataset.device);
         event.dataTransfer.effectAllowed = "copyMove";
       });
@@ -4377,7 +4500,7 @@ class DeviceMapPanel extends HTMLElement {
       map.addEventListener("drop", (event) => {
         event.preventDefault();
         const key = event.dataTransfer.getData("text/plain");
-        const row = this._deviceRows().find((item) => item.key === key);
+        const row = this._markerRows(this._deviceRows()).find((item) => item.key === key);
         if (!row) return;
 
         const point = this._pointFromEvent(map.querySelector(".map-content") || map, event);
@@ -4397,7 +4520,9 @@ class DeviceMapPanel extends HTMLElement {
         } else {
           this._markers[key] = {
             key,
+            type: row.markerType || "entity",
             entityId: row.entityId,
+            deviceId: row.markerType === "device" ? row.deviceId : "",
             name: row.name,
             icon: existingMarker?.icon || "",
             x: point.x,
@@ -4813,6 +4938,7 @@ class DeviceMapPanel extends HTMLElement {
 
       this._markers[row.key] = {
         key: row.key,
+        type: "entity",
         entityId: row.entityId,
         name: row.name,
         icon: this._markers[row.key]?.icon || "",
@@ -4929,7 +5055,7 @@ class DeviceMapPanel extends HTMLElement {
     if (!floor) return false;
 
     const rows = this._hass?.states ? this._deviceRows() : [];
-    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const rowByKey = new Map(this._markerRows(rows).map((row) => [row.key, row]));
     let markerKey = target.markerKey;
     const markerRequest = markerKey.toLowerCase();
     if (target.offline && (!markerKey || ["first", "offline", "first-offline"].includes(markerRequest))) {
@@ -5007,7 +5133,7 @@ class DeviceMapPanel extends HTMLElement {
     }
 
     const rows = this._deviceRows();
-    const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const rowByKey = new Map(this._markerRows(rows).map((row) => [row.key, row]));
     const isEditing = this._canEdit() && this._mode === "edit";
     let offlineCount = 0;
     let placedCount = 0;
@@ -5129,15 +5255,104 @@ class DeviceMapPanel extends HTMLElement {
     `;
   }
 
-  _deviceListItem(row) {
+  _sidebarMode() {
+    return ["devices", "mixed"].includes(this._config.sidebar_mode) ? this._config.sidebar_mode : "entities";
+  }
+
+  _sidebarListTemplate(rows) {
+    if (this._sidebarMode() === "entities") {
+      return rows.map((row) => this._deviceListItem(row)).join("") || `<div class="empty-list">No entities match</div>`;
+    }
+
+    const groups = this._deviceSidebarGroups(rows);
+    return groups.map((group) => this._deviceGroupTemplate(group)).join("") || `<div class="empty-list">No devices match</div>`;
+  }
+
+  _deviceSidebarGroups(rows) {
+    const groups = new Map();
+
+    for (const row of rows) {
+      const key = row.deviceId || `entity:${row.entityId}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          deviceId: row.deviceId || "",
+          markerKey: row.deviceId ? this._deviceMarkerKey(row.deviceId) : "",
+          name: row.deviceName || row.name,
+          areaNames: new Set(),
+          offline: false,
+          offlineCount: 0,
+          placedCount: 0,
+          devicePlaced: false,
+          rows: [],
+        });
+      }
+
+      const group = groups.get(key);
+      group.rows.push(row);
+      group.areaNames.add(row.areaName);
+      group.offline = group.offline || row.offline;
+      if (row.offline) group.offlineCount += 1;
+      if (this._markers[row.key]) group.placedCount += 1;
+      if (group.markerKey && this._markers[group.markerKey]) group.devicePlaced = true;
+    }
+
+    return [...groups.values()]
+      .map((group) => {
+        const areaNames = [...group.areaNames].filter(Boolean).sort((a, b) => a.localeCompare(b));
+        return {
+          ...group,
+          areaName: areaNames.length > 1 ? `${areaNames.length} areas` : areaNames[0] || "No area",
+          rows: group.rows.sort((a, b) => a.name.localeCompare(b.name)),
+        };
+      })
+      .sort((a, b) => a.areaName.localeCompare(b.areaName) || a.name.localeCompare(b.name));
+  }
+
+  _deviceGroupTemplate(group) {
+    const iconRow = group.rows.find((row) => row.offline) || group.rows[0];
+    const icon = iconRow ? this._markerIcon(iconRow) : "mdi:devices";
+    const entityText = `${group.rows.length} ${group.rows.length === 1 ? "entity" : "entities"}`;
+    const countText = group.offlineCount ? `${group.offlineCount} offline / ${entityText}` : entityText;
+    const placedText = group.placedCount ? ` - ${group.placedCount} entity ${group.placedCount === 1 ? "placed" : "markers"}` : "";
+    const canDragDevice = this._sidebarMode() === "mixed" && group.markerKey;
+    const deviceAction = canDragDevice
+      ? group.devicePlaced
+        ? `<button type="button" class="remove device-marker-action" data-remove="${this._escape(group.markerKey)}" title="Remove device marker">Remove device</button>`
+        : `<span class="placed device-marker-action" draggable="true" data-device="${this._escape(group.markerKey)}" title="Drag device marker">Drag device</span>`
+      : "";
+    const open = this._openDeviceGroups.has(group.key) || this._filters.search.trim() || group.rows.length === 1;
+
+    return `
+      <details class="device-group ${group.offline ? "offline" : "online"}" data-device-group="${this._escape(group.key)}" ${open ? "open" : ""}>
+        <summary>
+          <span class="dot"><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
+          <span class="device-text">
+            <strong>${this._escape(group.name)}</strong>
+            <small>${this._escape(group.areaName)} - ${this._escape(countText + placedText)}</small>
+          </span>
+          ${deviceAction}
+        </summary>
+        <div class="device-group-entities">
+          ${group.rows.map((row) => this._deviceListItem(row, { nested: true })).join("")}
+        </div>
+      </details>
+    `;
+  }
+
+  _deviceListItem(row, options = {}) {
     const placed = Boolean(this._markers[row.key]);
     const icon = this._markerIcon(row);
+    const nested = options.nested === true;
+    const meta = nested
+      ? `${row.displayDomain || row.domain} - ${row.entityId}`
+      : `${row.areaName} - ${row.deviceName || row.displayDomain || row.displayIntegration}`;
     return `
-      <div class="device-row ${placed ? "is-placed" : ""} ${row.offline ? "offline" : "online"}" draggable="true" data-device="${this._escape(row.key)}">
+      <div class="device-row ${nested ? "nested" : ""} ${placed ? "is-placed" : ""} ${row.offline ? "offline" : "online"}" draggable="true" data-device="${this._escape(row.key)}">
         <span class="dot"><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
         <span class="device-text">
           <strong>${this._escape(row.name)}</strong>
-          <small>${this._escape(row.areaName)} - ${this._escape(row.deviceName || row.displayDomain || row.displayIntegration)}</small>
+          <small>${this._escape(meta)}</small>
         </span>
         ${
           placed
@@ -5171,7 +5386,7 @@ class DeviceMapPanel extends HTMLElement {
     const title = this._markerTitle(row);
     return `
       <button
-        class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
+        class="marker ${row.markerType === "device" ? "device-marker" : "entity-marker"} ${this._display.showLabels ? "with-label" : "icon-only"} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
         style="left: ${this._escape(marker.x)}%; top: ${this._escape(marker.y)}%; --marker-size: ${this._escape(size)}px;"
         draggable="${isEditing ? "true" : "false"}"
         data-marker="${this._escape(row.key)}"
@@ -5186,11 +5401,31 @@ class DeviceMapPanel extends HTMLElement {
   }
 
   _markerTitle(row) {
+    if (row.markerType === "device") {
+      const offlineCount = row.offlineEntities?.length || 0;
+      const summary = offlineCount ? `${offlineCount} offline / ${row.entityCount} entities` : `${row.entityCount} entities online`;
+      return row.parentDeviceName ? `${row.name}\n${summary}\nConnected via ${row.parentDeviceName}` : `${row.name}\n${summary}`;
+    }
+
     const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
     return row.parentDeviceName ? `${title}\nConnected via ${row.parentDeviceName}` : title;
   }
 
   _markerTooltipTemplate(row) {
+    if (row.markerType === "device") {
+      const offlineCount = row.offlineEntities?.length || 0;
+      const summary = offlineCount ? `${offlineCount} offline / ${row.entityCount} entities` : `${row.entityCount} entities online`;
+      return `
+        <span class="marker-tooltip-line">${this._escape(row.name)}</span>
+        <span class="marker-tooltip-line marker-tooltip-parent">Device marker: <strong>${this._escape(summary)}</strong></span>
+        ${
+          row.parentDeviceName
+            ? `<span class="marker-tooltip-line marker-tooltip-parent">Connected via <strong>${this._escape(row.parentDeviceName)}</strong></span>`
+            : ""
+        }
+      `;
+    }
+
     const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
     return `
       <span class="marker-tooltip-line">${this._escape(title)}</span>
@@ -5216,14 +5451,7 @@ class DeviceMapPanel extends HTMLElement {
             ...(markers.length
               ? [
                   "    markers:",
-                  ...markers.flatMap((marker) => [
-                    `      - key: ${marker.key}`,
-                    `        entity: ${marker.entity}`,
-                    `        name: ${marker.name}`,
-                    ...(marker.icon ? [`        icon: ${marker.icon}`] : []),
-                    `        x: ${marker.x}`,
-                    `        y: ${marker.y}`,
-                  ]),
+                  ...markers.flatMap((marker) => this._yamlExportMarker(marker, 6)),
                 ]
               : ["    markers: []"]),
           ];
@@ -5235,17 +5463,33 @@ class DeviceMapPanel extends HTMLElement {
 
     if (!markers.length) return "markers: []";
 
+    return ["markers:", ...markers.flatMap((marker) => this._yamlExportMarker(marker, 2))].join("\n");
+  }
+
+  _yamlExportMarker(marker, indent) {
+    const space = " ".repeat(indent);
+    const child = " ".repeat(indent + 2);
+    if (marker.type === "device") {
+      return [
+        `${space}- key: ${marker.key}`,
+        `${child}type: device`,
+        `${child}device_id: ${marker.deviceId}`,
+        ...(marker.primaryEntity ? [`${child}primary_entity: ${marker.primaryEntity}`] : []),
+        `${child}name: ${marker.name}`,
+        ...(marker.icon ? [`${child}icon: ${marker.icon}`] : []),
+        `${child}x: ${marker.x}`,
+        `${child}y: ${marker.y}`,
+      ];
+    }
+
     return [
-      "markers:",
-      ...markers.flatMap((marker) => [
-        `  - key: ${marker.key}`,
-        `    entity: ${marker.entity}`,
-        `    name: ${marker.name}`,
-        ...(marker.icon ? [`    icon: ${marker.icon}`] : []),
-        `    x: ${marker.x}`,
-        `    y: ${marker.y}`,
-      ]),
-    ].join("\n");
+      `${space}- key: ${marker.key}`,
+      `${child}entity: ${marker.entity}`,
+      `${child}name: ${marker.name}`,
+      ...(marker.icon ? [`${child}icon: ${marker.icon}`] : []),
+      `${child}x: ${marker.x}`,
+      `${child}y: ${marker.y}`,
+    ];
   }
 
   _yamlMarkersForFloor(floorId, rowByKey) {
@@ -5253,7 +5497,22 @@ class DeviceMapPanel extends HTMLElement {
     return Object.entries(floorMarkers)
       .map(([key, marker]) => {
         const row = rowByKey.get(key);
+        const type = row?.markerType || marker.type || "entity";
+        if (type === "device") {
+          return {
+            type: "device",
+            key,
+            deviceId: row?.deviceId || marker.deviceId || marker.device_id || String(key).replace(/^device:/, ""),
+            primaryEntity: row?.entityId || marker.entityId || marker.primaryEntity || marker.primary_entity || "",
+            name: row?.name || marker.name || key,
+            icon: marker.icon || "",
+            x: Number(marker.x).toFixed(2),
+            y: Number(marker.y).toFixed(2),
+          };
+        }
+
         return {
+          type: "entity",
           key,
           entity: row?.entityId || marker.entityId,
           name: row?.name || marker.name || key,
@@ -5424,6 +5683,60 @@ class DeviceMapPanel extends HTMLElement {
           padding-right: 2px;
         }
 
+        .devices.grouped {
+          gap: 8px;
+        }
+
+        .device-group {
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: var(--card-background-color, #fff);
+          overflow: hidden;
+        }
+
+        .device-group summary {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto auto;
+          align-items: start;
+          gap: 9px;
+          min-height: 48px;
+          cursor: pointer;
+          list-style: none;
+          padding: 8px;
+        }
+
+        .device-group summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .device-group summary::after {
+          color: var(--dmp-muted);
+          content: "+";
+          font-size: 16px;
+          font-weight: 800;
+          line-height: 28px;
+        }
+
+        .device-group[open] summary::after {
+          content: "-";
+        }
+
+        .device-group-entities {
+          display: grid;
+          gap: 6px;
+          padding: 0 8px 8px 44px;
+        }
+
+        .device-marker-action {
+          align-self: center;
+          cursor: grab;
+          white-space: nowrap;
+        }
+
+        .device-marker-action:active {
+          cursor: grabbing;
+        }
+
         .device-row {
           display: grid;
           grid-template-columns: auto minmax(0, 1fr) auto;
@@ -5441,6 +5754,15 @@ class DeviceMapPanel extends HTMLElement {
           grid-template-rows: auto auto;
           row-gap: 8px;
           min-height: 84px;
+        }
+
+        .device-row.nested {
+          background: var(--secondary-background-color, #f7f8fa);
+          min-height: 44px;
+        }
+
+        .device-row.nested.is-placed {
+          min-height: 80px;
         }
 
         .device-row:active {
@@ -6220,6 +6542,10 @@ class DeviceMapPanel extends HTMLElement {
           line-height: 0;
         }
 
+        .marker.device-marker .marker-icon {
+          border-radius: 8px;
+        }
+
         .marker.online .marker-icon {
           background: var(--dmp-good);
         }
@@ -6448,6 +6774,7 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
       marker_size: 18,
       show_labels: true,
       show_entity_state: false,
+      sidebar_mode: "entities",
       nudge_step: 1,
       ...config,
     };
@@ -6498,6 +6825,11 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
           ${this._field("nudge_step", "Nudge step", { type: "number", min: 0.05, max: 10, step: 0.05 })}
           ${this._checkbox("show_labels", "Show marker names", { defaultValue: true })}
           ${this._checkbox("show_entity_state", "Show entity state styling", { defaultValue: false })}
+          ${this._select("sidebar_mode", "Edit sidebar mode", [
+            ["entities", "Entities"],
+            ["devices", "Devices grouped"],
+            ["mixed", "Mixed: devices and entities"],
+          ])}
         </fieldset>
         <fieldset>
           <legend>Filters</legend>
@@ -6600,6 +6932,22 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
   _markerYaml(marker, indent) {
     const space = " ".repeat(indent);
     const child = " ".repeat(indent + 2);
+    const type = marker.type === "device" || marker.device_id || marker.deviceId ? "device" : "entity";
+    if (type === "device") {
+      const deviceId = marker.device_id || marker.deviceId || String(marker.key || "").replace(/^device:/, "");
+      const key = marker.key || (deviceId ? `device:${deviceId}` : "");
+      return [
+        `${space}- key: ${this._yamlScalar(key)}`,
+        `${child}type: device`,
+        `${child}device_id: ${this._yamlScalar(deviceId)}`,
+        ...((marker.primary_entity || marker.primaryEntity || marker.entity || marker.entityId) ? [`${child}primary_entity: ${this._yamlScalar(marker.primary_entity || marker.primaryEntity || marker.entity || marker.entityId)}`] : []),
+        ...(marker.name ? [`${child}name: ${this._yamlScalar(marker.name)}`] : []),
+        ...(marker.icon ? [`${child}icon: ${this._yamlScalar(marker.icon)}`] : []),
+        `${child}x: ${Number(marker.x || 0).toFixed(2)}`,
+        `${child}y: ${Number(marker.y || 0).toFixed(2)}`,
+      ];
+    }
+
     return [
       `${space}- key: ${this._yamlScalar(marker.key || marker.entity || marker.device || "")}`,
       `${child}entity: ${this._yamlScalar(marker.entity || marker.entityId || marker.key || "")}`,

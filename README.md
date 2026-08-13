@@ -116,9 +116,15 @@ floors:
 
 When `floors` is configured, the top bar shows a floor selector. Each floor has its own image and marker positions, while the same sidebar, filters, Edit Mode tools, alignment tools, and YAML export continue to work on the selected floor.
 
-The card shows a sidebar with all devices. Filter the list by placement, online/offline status, type, integration, area, or search text, then drag devices from the sidebar onto the drawing. Drag an existing marker to move it, or use **Remove** in the sidebar to remove it from the map.
+The card shows an entity sidebar by default. Filter the list by placement, online/offline status, type, integration, area, or search text, then drag entities from the sidebar onto the drawing. Drag an existing marker to move it, or use **Remove** in the sidebar to remove it from the map.
 
-The map places entities individually, so multi-entity devices such as occupancy sensors with lights, switches, presets, and motion sensors can have separate markers that open the correct Home Assistant more-info panel.
+The map can browse the Edit Mode sidebar in three modes. `sidebar_mode: entities` keeps the current entity list. `sidebar_mode: devices` groups entities under their physical Home Assistant device while still dragging child entities. `sidebar_mode: mixed` keeps those groups and also lets you drag the device header as a device marker.
+
+```yaml
+sidebar_mode: mixed
+```
+
+Entity markers track one entity. Device markers track the grouped Home Assistant device and turn offline when any child entity in that device is offline. Device markers export with `type: device` and `device_id`, while existing markers without a type remain entity markers.
 
 The map opens in **User Mode** by default, which shows only the drawing and device markers. Home Assistant admin users can switch to **Edit Mode** to see the sidebar, filters, drag-and-drop tools, remove buttons, and YAML export. Non-admin Home Assistant users cannot enter Edit Mode.
 
