@@ -159,6 +159,21 @@ image: /local/floorplan.png
 show_entity_state: true
 ```
 
+Enable `show_legend` to add a floating map legend. The visual editor includes controls to turn the legend on, choose its corner, and add manual icon/label rows. The legend includes marker status samples for inactive/off, active/on, and offline. If no manual legend items are added, the card auto-detects the placed marker icons.
+
+```yaml
+type: custom:device-map-panel
+title: Device Map
+image: /local/floorplan.png
+show_legend: true
+legend_position: top-left
+legend_items:
+  - icon: mdi:lightbulb
+    label: Lights
+  - icon: mdi:blinds
+    label: Covers
+```
+
 When placed markers are offline, the map shows an offline marker notification list above the floorplan. Click an offline marker in that list to switch to the correct floor, center the map on the marker, and briefly highlight it.
 
 The map can also be opened from another dashboard view with URL parameters. Use `dmp_floor` with a floor `id` or name, and add `dmp_offline=1` to focus the first offline marker on that floor:

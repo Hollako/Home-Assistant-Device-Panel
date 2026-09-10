@@ -1,4 +1,4 @@
-const VERSION = "2.8.15";
+const VERSION = "2.8.16";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -2603,6 +2603,18 @@ class DevicePanelConfigEditor extends HTMLElement {
           grid-template-columns: 1fr auto;
         }
 
+        .legend-editor {
+          display: grid;
+          gap: 8px;
+        }
+
+        .legend-editor-row {
+          align-items: end;
+          display: grid;
+          gap: 8px;
+          grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) auto;
+        }
+
         .selected-row span {
           min-width: 0;
           overflow: hidden;
@@ -3271,6 +3283,9 @@ class DeviceMapPanel extends HTMLElement {
       marker_size: 18,
       show_labels: true,
       show_entity_state: false,
+      show_legend: false,
+      legend_position: "top-left",
+      legend_items: [],
       sidebar_mode: "entities",
       nudge_step: 1,
       ...config,
@@ -4186,6 +4201,7 @@ class DeviceMapPanel extends HTMLElement {
               activeFloor.image
                 ? `
             <div class="map ${isEditing ? "editable" : ""} ${this._zoom < 1 ? "zoomed-out" : ""}" data-map>
+              ${this._mapLegendTemplate(placedRows)}
               <div class="map-content" style="width: ${this._escape(this._zoom * 100)}%;">
                 <img src="${this._escape(activeFloor.image)}" alt="" />
                 <div class="image-error">Image could not be loaded: ${this._escape(activeFloor.image)}</div>
@@ -5400,6 +5416,85 @@ class DeviceMapPanel extends HTMLElement {
     `;
   }
 
+  _mapLegendTemplate(placedRows) {
+    if (this._config.show_legend !== true) return "";
+
+    const items = this._legendItems(placedRows);
+    const position = this._legendPosition();
+    return `
+      <section class="map-legend ${this._escape(position)}" aria-label="Map legend">
+        <div class="map-legend-title">Legend</div>
+        ${
+          items.length
+            ? `
+        <div class="map-legend-items">
+          ${items
+            .map(
+              (item) => `
+            <div class="map-legend-row">
+              <span class="map-legend-icon"><ha-icon icon="${this._escape(item.icon)}"></ha-icon></span>
+              <span>${this._escape(item.label)}</span>
+            </div>
+          `
+            )
+            .join("")}
+        </div>
+        `
+            : ""
+        }
+        <div class="map-legend-statuses" aria-label="Marker status colors">
+          <div class="map-legend-row">
+            <span class="legend-status inactive"></span>
+            <span>Online/Inactive</span>
+          </div>
+          <div class="map-legend-row">
+            <span class="legend-status active"></span>
+            <span>Online/Active</span>
+          </div>
+          <div class="map-legend-row">
+            <span class="legend-status offline"></span>
+            <span>Offline</span>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  _legendPosition() {
+    const value = String(this._config.legend_position || "top-left");
+    return ["top-left", "top-right", "bottom-left", "bottom-right"].includes(value) ? value : "top-left";
+  }
+
+  _legendItems(placedRows) {
+    const manual = this._normalizedLegendItems(this._config.legend_items);
+    if (manual.length) return manual;
+
+    const seen = new Set();
+    return placedRows.reduce((items, row) => {
+      const icon = this._markerIcon(row);
+      if (!icon || seen.has(icon)) return items;
+      seen.add(icon);
+      items.push({
+        icon,
+        label: row.displayDomain || row.displayIntegration || row.domain || icon,
+      });
+      return items;
+    }, []);
+  }
+
+  _normalizedLegendItems(items) {
+    if (!Array.isArray(items)) return [];
+    return items
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const icon = String(item.icon || "").trim();
+        const label = String(item.label || item.name || "").trim();
+        if (!icon || !label) return null;
+        return { icon, label };
+      })
+      .filter(Boolean);
+  }
+
   _markerTitle(row) {
     if (row.markerType === "device") {
       const offlineCount = row.offlineEntities?.length || 0;
@@ -6321,6 +6416,119 @@ class DeviceMapPanel extends HTMLElement {
           user-select: none;
         }
 
+        .map-legend {
+          position: absolute;
+          z-index: 6;
+          display: grid;
+          gap: 9px;
+          width: min(260px, calc(100% - 24px));
+          max-height: min(420px, calc(100% - 24px));
+          overflow: auto;
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--card-background-color, #fff) 88%, transparent);
+          box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+          box-sizing: border-box;
+          padding: 10px;
+          pointer-events: auto;
+          backdrop-filter: blur(8px);
+        }
+
+        .map-legend.top-left {
+          top: 12px;
+          left: 12px;
+        }
+
+        .map-legend.top-right {
+          top: 12px;
+          right: 12px;
+        }
+
+        .map-legend.bottom-left {
+          bottom: 12px;
+          left: 12px;
+        }
+
+        .map-legend.bottom-right {
+          right: 12px;
+          bottom: 12px;
+        }
+
+        .map-legend-title {
+          color: var(--primary-text-color);
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .map-legend-items,
+        .map-legend-statuses {
+          display: grid;
+          gap: 7px;
+        }
+
+        .map-legend-statuses {
+          border-top: 1px solid var(--dmp-border);
+          padding-top: 9px;
+        }
+
+        .map-legend-row {
+          display: grid;
+          grid-template-columns: 34px minmax(0, 1fr);
+          align-items: center;
+          gap: 8px;
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          min-width: 0;
+        }
+
+        .map-legend-row span:last-child {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .map-legend-icon {
+          display: grid;
+          justify-self: center;
+          place-items: center;
+          width: 24px;
+          height: 24px;
+          border-radius: 999px;
+          background: var(--dmp-good);
+          color: #fff;
+          box-shadow: 0 0 0 3px rgba(29, 143, 95, 0.96), 0 0 12px rgba(29, 143, 95, 0.65);
+        }
+
+        .map-legend-icon ha-icon {
+          --mdc-icon-size: 15px;
+        }
+
+        .legend-status {
+          display: block;
+          justify-self: center;
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+          box-sizing: border-box;
+        }
+
+        .legend-status.inactive {
+          background: #111827;
+          border: 4px solid var(--dmp-good);
+        }
+
+        .legend-status.active {
+          background: #f5c542;
+          border: 4px solid var(--dmp-good);
+        }
+
+        .legend-status.offline {
+          background: var(--dmp-bad);
+          border: 7px solid var(--dmp-bad);
+        }
+
         .nudge-pad {
           position: absolute;
           z-index: 5;
@@ -6774,6 +6982,9 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
       marker_size: 18,
       show_labels: true,
       show_entity_state: false,
+      show_legend: false,
+      legend_position: "top-left",
+      legend_items: [],
       sidebar_mode: "entities",
       nudge_step: 1,
       ...config,
@@ -6825,11 +7036,22 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
           ${this._field("nudge_step", "Nudge step", { type: "number", min: 0.05, max: 10, step: 0.05 })}
           ${this._checkbox("show_labels", "Show marker names", { defaultValue: true })}
           ${this._checkbox("show_entity_state", "Show entity state styling", { defaultValue: false })}
+          ${this._checkbox("show_legend", "Show map legend", { defaultValue: false })}
+          ${this._select("legend_position", "Legend position", [
+            ["top-left", "Top left"],
+            ["top-right", "Top right"],
+            ["bottom-left", "Bottom left"],
+            ["bottom-right", "Bottom right"],
+          ])}
           ${this._select("sidebar_mode", "Edit sidebar mode", [
             ["entities", "Entities"],
             ["devices", "Devices grouped"],
             ["mixed", "Mixed: devices and entities"],
           ])}
+        </fieldset>
+        <fieldset>
+          <legend>Legend</legend>
+          ${this._legendEditorTemplate()}
         </fieldset>
         <fieldset>
           <legend>Filters</legend>
@@ -6851,6 +7073,7 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
     `;
     this._wireBasicInputs(["offline_states"]);
     this.shadowRoot.querySelector("[data-apply-layout]")?.addEventListener("click", () => this._applyLayoutYaml());
+    this._wireLegendItems();
     this._wireMultiPickers();
     this._wireLabelInputs();
   }
@@ -6891,6 +7114,87 @@ class DeviceMapPanelEditor extends DevicePanelConfigEditor {
       .flatMap((stateObj) => [stateObj.attributes?.area, stateObj.attributes?.area_id])
       .filter(Boolean);
     return [...new Set([...fromRegistry, ...fromStates])].sort((a, b) => a.localeCompare(b));
+  }
+
+  _legendEditorTemplate() {
+    const items = Array.isArray(this._config.legend_items) ? this._config.legend_items : [];
+    const rows = items.length
+      ? items
+          .map(
+            (item, index) => `
+              <div class="legend-editor-row">
+                <label>
+                  <span>Icon</span>
+                  <input data-legend-icon="${this._escape(index)}" value="${this._escape(item.icon || "")}" placeholder="mdi:lightbulb" />
+                </label>
+                <label>
+                  <span>Label</span>
+                  <input data-legend-label="${this._escape(index)}" value="${this._escape(item.label || item.name || "")}" placeholder="Lights" />
+                </label>
+                <button type="button" class="remove-chip" data-remove-legend-item="${this._escape(index)}">Remove</button>
+              </div>
+            `
+          )
+          .join("")
+      : `<div class="empty-options">No manual legend items. The legend will auto-detect placed marker icons.</div>`;
+
+    return `
+      <div class="legend-editor">
+        <div class="selected-list">${rows}</div>
+        <button type="button" data-add-legend-item>Add legend item</button>
+      </div>
+    `;
+  }
+
+  _wireLegendItems() {
+    this.shadowRoot.querySelectorAll("[data-legend-icon], [data-legend-label]").forEach((element) => {
+      element.addEventListener("change", () => this._emitLegendItemsFromEditor());
+    });
+
+    this.shadowRoot.querySelectorAll("[data-remove-legend-item]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        const index = Number(event.currentTarget.dataset.removeLegendItem);
+        const items = this._legendItemsFromConfig();
+        if (!Number.isInteger(index) || index < 0 || index >= items.length) return;
+        items.splice(index, 1);
+        this._emitConfig({ ...this._config, legend_items: items });
+        this._renderEditor();
+      });
+    });
+
+    this.shadowRoot.querySelector("[data-add-legend-item]")?.addEventListener("click", () => {
+      const items = this._legendItemsFromConfig();
+      items.push({ icon: "mdi:devices", label: "New item" });
+      this._emitConfig({ ...this._config, legend_items: items });
+      this._renderEditor();
+    });
+  }
+
+  _legendItemsFromConfig() {
+    return (Array.isArray(this._config.legend_items) ? this._config.legend_items : []).map((item) => ({
+      icon: String(item?.icon || "").trim(),
+      label: String(item?.label || item?.name || "").trim(),
+    }));
+  }
+
+  _emitLegendItemsFromEditor() {
+    const items = this._legendItemsFromConfig();
+    this.shadowRoot.querySelectorAll("[data-legend-icon]").forEach((input) => {
+      const index = Number(input.dataset.legendIcon);
+      if (!Number.isInteger(index)) return;
+      if (!items[index]) items[index] = { icon: "", label: "" };
+      items[index].icon = input.value.trim();
+    });
+    this.shadowRoot.querySelectorAll("[data-legend-label]").forEach((input) => {
+      const index = Number(input.dataset.legendLabel);
+      if (!Number.isInteger(index)) return;
+      if (!items[index]) items[index] = { icon: "", label: "" };
+      items[index].label = input.value.trim();
+    });
+    this._emitConfig({
+      ...this._config,
+      legend_items: items.filter((item) => item.icon || item.label),
+    });
   }
 
   _layoutYamlFromConfig(config) {
