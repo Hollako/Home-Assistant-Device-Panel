@@ -159,7 +159,7 @@ image: /local/floorplan.png
 show_entity_state: true
 ```
 
-Enable `show_legend` to add a floating map legend. The visual editor includes controls to turn the legend on, choose its corner, and add manual icon/label rows. The legend includes marker status samples for inactive/off, active/on, and offline. If no manual legend items are added, the card auto-detects the placed marker icons.
+Enable `show_legend` to add a floating map legend. The visual editor includes controls to turn the legend on, choose its default corner, and add manual icon/label rows. Users can drag the legend by its header, collapse it, or reset it back to the configured corner. The legend includes marker status samples for inactive/off, active/on, and offline. If no manual legend items are added, the card auto-detects the placed marker icons.
 
 ```yaml
 type: custom:device-map-panel

@@ -1,4 +1,4 @@
-const VERSION = "2.8.16";
+const VERSION = "2.8.17";
 class OfflineDevicePanel extends HTMLElement {
   static getConfigElement() {
     return document.createElement("offline-device-panel-editor");
@@ -3233,6 +3233,8 @@ class DeviceMapPanel extends HTMLElement {
       showLabels: true,
       nudgeStep: 1,
       mapViewports: {},
+      legendPosition: null,
+      legendCollapsed: false,
     };
     this._mapScroll = {
       left: 0,
@@ -3990,6 +3992,19 @@ class DeviceMapPanel extends HTMLElement {
       nudgeStep: Number.isFinite(nudgeStep) ? Math.max(0.05, Math.min(10, nudgeStep)) : 1,
       showLabels: display.showLabels !== false && display.showLabels !== "false",
       mapViewports: display.mapViewports && typeof display.mapViewports === "object" && !Array.isArray(display.mapViewports) ? display.mapViewports : {},
+      legendPosition: this._normalizedLegendPosition(display.legendPosition),
+      legendCollapsed: display.legendCollapsed === true || display.legendCollapsed === "true",
+    };
+  }
+
+  _normalizedLegendPosition(position) {
+    if (!position || typeof position !== "object" || Array.isArray(position)) return null;
+    const left = Number(position.left);
+    const top = Number(position.top);
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+    return {
+      left: Math.max(0, Math.min(1, left)),
+      top: Math.max(0, Math.min(1, top)),
     };
   }
 
@@ -4344,6 +4359,7 @@ class DeviceMapPanel extends HTMLElement {
         if (!this._isRestoringMapScroll) this._mapViewportVersion += 1;
         this._captureMapScroll();
         this._positionNudgePad();
+        this._positionLegend();
       });
       const image = map.querySelector("img");
       if (image) {
@@ -4356,8 +4372,37 @@ class DeviceMapPanel extends HTMLElement {
         });
       }
       this._attachPanEvents(map);
-      requestAnimationFrame(() => this._positionNudgePad());
+      requestAnimationFrame(() => {
+        this._positionNudgePad();
+        this._positionLegend();
+      });
     }
+
+    this.shadowRoot.querySelectorAll("[data-legend-drag-handle]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => this._startLegendDrag(event));
+    });
+
+    this.shadowRoot.querySelectorAll("[data-legend-toggle]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._display.legendCollapsed = !this._display.legendCollapsed;
+        this._display = this._normalizedDisplay(this._display);
+        this._saveDisplay();
+        this._render({ preserveMapViewport: true, preservePageScroll: true });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-legend-reset]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._display.legendPosition = null;
+        this._display = this._normalizedDisplay(this._display);
+        this._saveDisplay();
+        this._render({ preserveMapViewport: true, preservePageScroll: true });
+      });
+    });
 
     const mapAlertList = this.shadowRoot.querySelector(".map-alert-list");
     if (mapAlertList) {
@@ -4704,6 +4749,109 @@ class DeviceMapPanel extends HTMLElement {
     pad.style.top = `${Math.max(0, top)}px`;
   }
 
+  _legendDefaultViewportPosition(map, legend) {
+    const margin = 12;
+    const position = this._legendPosition();
+    const maxLeft = Math.max(margin, map.clientWidth - legend.offsetWidth - margin);
+    const maxTop = Math.max(margin, map.clientHeight - legend.offsetHeight - margin);
+    return {
+      left: position.includes("right") ? maxLeft : margin,
+      top: position.includes("bottom") ? maxTop : margin,
+    };
+  }
+
+  _legendViewportPosition(map, legend) {
+    const margin = 12;
+    const saved = this._normalizedLegendPosition(this._display.legendPosition);
+    if (!saved) return this._legendDefaultViewportPosition(map, legend);
+
+    const maxLeft = Math.max(0, map.clientWidth - legend.offsetWidth - margin * 2);
+    const maxTop = Math.max(0, map.clientHeight - legend.offsetHeight - margin * 2);
+    return {
+      left: margin + saved.left * maxLeft,
+      top: margin + saved.top * maxTop,
+    };
+  }
+
+  _positionLegend() {
+    const map = this.shadowRoot?.querySelector("[data-map]");
+    const legend = this.shadowRoot?.querySelector(".map-legend");
+    if (!map || !legend) return;
+
+    const position = this._legendViewportPosition(map, legend);
+    legend.style.left = `${map.scrollLeft + Math.max(0, position.left)}px`;
+    legend.style.top = `${map.scrollTop + Math.max(0, position.top)}px`;
+    legend.style.right = "auto";
+    legend.style.bottom = "auto";
+  }
+
+  _storeLegendViewportPosition(map, legend, left, top) {
+    const margin = 12;
+    const maxLeft = Math.max(0, map.clientWidth - legend.offsetWidth - margin * 2);
+    const maxTop = Math.max(0, map.clientHeight - legend.offsetHeight - margin * 2);
+    this._display.legendPosition = {
+      left: maxLeft ? Math.max(0, Math.min(1, (left - margin) / maxLeft)) : 0,
+      top: maxTop ? Math.max(0, Math.min(1, (top - margin) / maxTop)) : 0,
+    };
+    this._display = this._normalizedDisplay(this._display);
+  }
+
+  _startLegendDrag(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    if (event.target.closest("[data-legend-toggle], [data-legend-reset]")) return;
+
+    const legend = event.currentTarget.closest(".map-legend");
+    const map = this.shadowRoot?.querySelector("[data-map]");
+    if (!legend || !map) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const mapRect = map.getBoundingClientRect();
+    const legendRect = legend.getBoundingClientRect();
+    const offsetX = event.clientX - legendRect.left;
+    const offsetY = event.clientY - legendRect.top;
+    const margin = 12;
+    const pointerId = event.pointerId;
+    legend.classList.add("dragging");
+    legend.setPointerCapture?.(pointerId);
+
+    const moveLegend = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      moveEvent.stopPropagation();
+
+      const maxLeft = Math.max(margin, map.clientWidth - legend.offsetWidth - margin);
+      const maxTop = Math.max(margin, map.clientHeight - legend.offsetHeight - margin);
+      const left = Math.max(margin, Math.min(maxLeft, moveEvent.clientX - mapRect.left - offsetX));
+      const top = Math.max(margin, Math.min(maxTop, moveEvent.clientY - mapRect.top - offsetY));
+      legend.style.left = `${map.scrollLeft + left}px`;
+      legend.style.top = `${map.scrollTop + top}px`;
+      this._storeLegendViewportPosition(map, legend, left, top);
+    };
+
+    const stopLegend = (stopEvent) => {
+      if (stopEvent.pointerId !== pointerId) return;
+      stopEvent.preventDefault();
+      stopEvent.stopPropagation();
+      legend.classList.remove("dragging");
+      legend.removeEventListener("pointermove", moveLegend);
+      legend.removeEventListener("pointerup", stopLegend);
+      legend.removeEventListener("pointercancel", stopLegend);
+      try {
+        legend.releasePointerCapture?.(pointerId);
+      } catch (error) {
+        // Pointer capture may already be gone after browser/HA interruption.
+      }
+      this._saveDisplay();
+      this._render({ preserveMapViewport: true, preservePageScroll: true });
+    };
+
+    legend.addEventListener("pointermove", moveLegend);
+    legend.addEventListener("pointerup", stopLegend);
+    legend.addEventListener("pointercancel", stopLegend);
+  }
+
   _captureDeviceListScroll() {
     const deviceList = this.shadowRoot?.querySelector(".devices");
     if (!deviceList) return;
@@ -4730,6 +4878,7 @@ class DeviceMapPanel extends HTMLElement {
     map.addEventListener("pointerdown", (event) => {
       if (event.target.closest("[data-marker]")) return;
       if (event.target.closest(".nudge-pad")) return;
+      if (event.target.closest(".map-legend")) return;
       if (event.button !== undefined && event.button !== 0) return;
 
       event.preventDefault();
@@ -5421,11 +5570,21 @@ class DeviceMapPanel extends HTMLElement {
 
     const items = this._legendItems(placedRows);
     const position = this._legendPosition();
+    const collapsed = this._display.legendCollapsed === true;
+    const moved = !!this._normalizedLegendPosition(this._display.legendPosition);
     return `
-      <section class="map-legend ${this._escape(position)}" aria-label="Map legend">
-        <div class="map-legend-title">Legend</div>
+      <section class="map-legend ${this._escape(position)} ${moved ? "is-moved" : ""} ${collapsed ? "collapsed" : ""}" aria-label="Map legend">
+        <div class="map-legend-title" data-legend-drag-handle title="Drag legend">
+          <span>Legend</span>
+          <span class="map-legend-actions">
+            ${moved ? `<button type="button" class="map-legend-action" data-legend-reset title="Reset legend position" aria-label="Reset legend position"><ha-icon icon="mdi:restore"></ha-icon></button>` : ""}
+            <button type="button" class="map-legend-action" data-legend-toggle title="${collapsed ? "Expand legend" : "Collapse legend"}" aria-label="${collapsed ? "Expand legend" : "Collapse legend"}" aria-expanded="${collapsed ? "false" : "true"}">
+              <ha-icon icon="${collapsed ? "mdi:chevron-down" : "mdi:chevron-up"}"></ha-icon>
+            </button>
+          </span>
+        </div>
         ${
-          items.length
+          !collapsed && items.length
             ? `
         <div class="map-legend-items">
           ${items
@@ -5442,6 +5601,9 @@ class DeviceMapPanel extends HTMLElement {
         `
             : ""
         }
+        ${
+          !collapsed
+            ? `
         <div class="map-legend-statuses" aria-label="Marker status colors">
           <div class="map-legend-row">
             <span class="legend-status inactive"></span>
@@ -5456,6 +5618,9 @@ class DeviceMapPanel extends HTMLElement {
             <span>Offline</span>
           </div>
         </div>
+        `
+            : ""
+        }
       </section>
     `;
   }
@@ -6432,6 +6597,20 @@ class DeviceMapPanel extends HTMLElement {
           padding: 10px;
           pointer-events: auto;
           backdrop-filter: blur(8px);
+          touch-action: none;
+        }
+
+        .map-legend.dragging {
+          cursor: grabbing;
+          user-select: none;
+        }
+
+        .map-legend.collapsed {
+          width: auto;
+          min-width: 142px;
+          max-height: none;
+          overflow: visible;
+          padding: 8px 10px;
         }
 
         .map-legend.top-left {
@@ -6455,9 +6634,42 @@ class DeviceMapPanel extends HTMLElement {
         }
 
         .map-legend-title {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 10px;
           color: var(--primary-text-color);
+          cursor: grab;
           font-size: 13px;
           font-weight: 800;
+          user-select: none;
+        }
+
+        .map-legend.dragging .map-legend-title {
+          cursor: grabbing;
+        }
+
+        .map-legend-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+        }
+
+        .map-legend-action {
+          display: grid;
+          place-items: center;
+          width: 26px;
+          height: 26px;
+          padding: 0;
+          border: 1px solid var(--dmp-border);
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--card-background-color, #fff) 75%, transparent);
+          color: var(--primary-text-color);
+          cursor: pointer;
+        }
+
+        .map-legend-action ha-icon {
+          --mdc-icon-size: 16px;
         }
 
         .map-legend-items,
